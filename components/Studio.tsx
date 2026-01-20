@@ -321,29 +321,80 @@ const Studio = () => {
                 useCORS: true,
                 allowTaint: false,
                 backgroundColor: null,
-                logging: false,
-                width: element.offsetWidth,
-                height: element.offsetHeight,
-                onclone: (clonedDoc) => {
-                    const el = clonedDoc.getElementById('capture-target');
+                logging: true,
+                width: element.scrollWidth,
+                height: element.scrollHeight,
+                x: 0,
+                y: 0,
+                scrollX: 0,
+                scrollY: 0,
+                windowWidth: document.documentElement.offsetWidth,
+                windowHeight: document.documentElement.offsetHeight,
+                onclone: (doc) => {
+                    const el = doc.getElementById('capture-target');
                     if (el) {
                         el.style.transform = 'none';
                         el.style.boxShadow = 'none';
-
-                        // Fix for "oklab" / "color-mix" unsupported error in html2canvas
-                        const allElements = el.getElementsByTagName('*');
-                        for (let i = 0; i < allElements.length; i++) {
-                            const node = allElements[i] as HTMLElement;
-                            const style = window.getComputedStyle(node);
-                            // If it uses color-mix or oklab, replace with simple fallback
-                            if (style.backgroundColor.includes('color-mix') || style.backgroundColor.includes('oklab')) {
-                                node.style.backgroundColor = 'rgba(0,0,0,0.1)';
-                            }
-                            if (style.color.includes('color-mix') || style.color.includes('oklab')) {
-                                node.style.color = 'inherit';
-                            }
-                        }
+                        el.style.filter = 'none';
+                        el.style.margin = '0';
+                        el.style.padding = '0';
+                        el.style.left = '0';
+                        el.style.top = '0';
                     }
+
+                    // Robust nested paren regex for complex CSS functions
+                    const nestedRegex = (fn: string) => new RegExp(`${fn}\\s*\\((?:[^)(]|\\((?:[^)(]|\\([^)(]*\\))*\\))*\\)`, 'gi');
+
+                    const nuclearSanitize = (text: string) => {
+                        if (!text) return text;
+                        return text
+                            .replace(nestedRegex('oklch'), '#ffffff')
+                            .replace(nestedRegex('oklab'), '#ffffff')
+                            .replace(nestedRegex('color-mix'), '#333333')
+                            .replace(nestedRegex('light-dark'), '#ffffff')
+                            .replace(nestedRegex('lab'), '#ffffff')
+                            .replace(nestedRegex('lch'), '#ffffff')
+                            .replace(nestedRegex('hwb'), '#ffffff');
+                    };
+
+                    // 1. Sanitize all style tags
+                    const styles = doc.getElementsByTagName('style');
+                    for (let i = 0; i < styles.length; i++) {
+                        try {
+                            if (styles[i].innerHTML) {
+                                styles[i].innerHTML = nuclearSanitize(styles[i].innerHTML);
+                            }
+                        } catch (e) { }
+                    }
+
+                    // 2. Sanitize all inline styles and SVG attributes
+                    const all = doc.getElementsByTagName('*');
+                    for (let i = 0; i < all.length; i++) {
+                        const node = all[i] as HTMLElement;
+                        try {
+                            if (node.style && node.style.cssText) {
+                                node.style.cssText = nuclearSanitize(node.style.cssText);
+                            }
+                            ['fill', 'stroke', 'style'].forEach(attr => {
+                                if (node.hasAttribute(attr)) {
+                                    node.setAttribute(attr, nuclearSanitize(node.getAttribute(attr) || ''));
+                                }
+                            });
+                        } catch (e) { }
+                    }
+
+                    // 3. DO NOT remove links, instead inject a global override for oklab variables
+                    // that often crash html2canvas when parsed from the stylesheet context
+                    const override = doc.createElement('style');
+                    override.innerHTML = `
+                        * { 
+                            --tw-ring-color: transparent !important;
+                            --tw-shadow-color: transparent !important;
+                            --tw-outline-color: transparent !important;
+                            --tw-ring-offset-color: transparent !important;
+                        }
+                    `;
+                    doc.head.appendChild(override);
                 }
             });
 
@@ -372,14 +423,14 @@ const Studio = () => {
         };
 
         if (type === 'phone') defaultProps = { ...defaultProps, model: 'iPhone 16 Pro', image: '' };
-        if (type === 'bubble') defaultProps = { ...defaultProps, text: 'New Alert', bgColor: '#0bc9da', bgOpacity: 0.2, iconColor: '#ffffff', variant: 'glass' };
+        if (type === 'bubble') defaultProps = { ...defaultProps, text: 'New Alert', label: 'Touch to modify', bgColor: '#0bc9da', bgOpacity: 0.2, iconColor: '#ffffff', variant: 'glass' };
         if (type === 'message-stack') defaultProps = { ...defaultProps, text: 'You have new messages', bgColor: '#0bc9da', bgOpacity: 0.2, variant: 'glass' };
         if (type === 'avatar-group') defaultProps = { ...defaultProps, color: '#0bc9da' };
         if (type === 'grid-menu') defaultProps = { ...defaultProps, bgColor: '#161920', bgOpacity: 0.8 };
         if (type === 'chart') defaultProps = { ...defaultProps, bgColor: '#161920', bgOpacity: 0.8, color: '#0bc9da' };
         if (type === 'progress-circle') defaultProps = { ...defaultProps, text: '85%', label: 'Savings Goal', color: '#0bc9da' };
         if (type === 'stat') defaultProps = { ...defaultProps, text: '$500', label: 'Revenue', bgColor: '#161920', bgOpacity: 0.8, color: '#0bc9da' };
-        if (type === 'text') defaultProps = { ...defaultProps, text: 'Headline', textColor: '#ffffff' };
+        if (type === 'text') defaultProps = { ...defaultProps, text: 'Headline', label: 'Design Studio', variant: 'solid', textColor: '#ffffff' };
         if (type === 'sticker') defaultProps = { ...defaultProps, text: 'NEW', bgColor: '#0bc9da', bgOpacity: 1.0 };
         if (type === 'icon') defaultProps = { ...defaultProps, text: 'star', iconColor: '#ffffff' };
         if (type === 'graphics') defaultProps = { ...defaultProps, text: '' };
@@ -621,23 +672,52 @@ const Studio = () => {
                                         <p
                                             contentEditable
                                             suppressContentEditableWarning
-                                            className="font-bold text-sm outline-none cursor-text select-text relative z-[50] pointer-events-auto"
-                                            style={{ color: el.props.textColor || 'inherit' }}
+                                            className="font-bold text-sm outline-none cursor-text select-text relative z-[50] pointer-events-auto min-w-[50px] mb-0.5"
+                                            style={{ color: el.props.textColor || (el.props.variant === 'solid' ? 'black' : 'white') }}
                                             onPointerDown={(e) => {
+                                                if (!selectedIds.includes(el.id)) return;
                                                 e.stopPropagation();
-                                                if (selectedIds.includes(el.id)) e.currentTarget.focus();
+                                                const target = e.currentTarget;
+                                                setTimeout(() => target.focus(), 10);
+                                            }}
+                                            onFocus={(e) => {
+                                                const range = document.createRange();
+                                                const sel = window.getSelection();
+                                                range.selectNodeContents(e.currentTarget);
+                                                sel?.removeAllRanges();
+                                                sel?.addRange(range);
                                             }}
                                             onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                         >
                                             {el.props.text || 'New Alert'}
                                         </p>
-                                        <p className="text-[10px] opacity-60 pointer-events-none">Tap to edit</p>
+                                        <p
+                                            contentEditable
+                                            suppressContentEditableWarning
+                                            className="text-[9px] font-black uppercase tracking-tighter opacity-40 outline-none cursor-text select-text pointer-events-auto"
+                                            onPointerDown={(e) => {
+                                                if (!selectedIds.includes(el.id)) return;
+                                                e.stopPropagation();
+                                                const target = e.currentTarget;
+                                                setTimeout(() => target.focus(), 10);
+                                            }}
+                                            onFocus={(e) => {
+                                                const range = document.createRange();
+                                                const sel = window.getSelection();
+                                                range.selectNodeContents(e.currentTarget);
+                                                sel?.removeAllRanges();
+                                                sel?.addRange(range);
+                                            }}
+                                            onBlur={(e) => updateElement(el.id, { props: { label: e.currentTarget.innerText } })}
+                                        >
+                                            {el.props.label || 'Touch to modify'}
+                                        </p>
                                     </div>
                                 </div>
                             )}
 
                             {el.type === 'message-stack' && (
-                                <div className="relative w-[240px] h-[80px]" onPointerDown={(e) => e.stopPropagation()}>
+                                <div className="relative w-[240px] h-[80px]" onPointerDown={(e) => { if (selectedIds.includes(el.id)) e.stopPropagation(); }}>
                                     <div className="absolute top-4 left-4 w-full h-full bg-white/5 rounded-2xl border border-white/5 translate-y-4"></div>
                                     <div className="absolute top-2 left-2 w-full h-full bg-white/10 rounded-2xl border border-white/10 translate-y-2"></div>
                                     <div
@@ -655,8 +735,17 @@ const Studio = () => {
                                                 contentEditable suppressContentEditableWarning
                                                 className="font-bold text-sm outline-none select-text cursor-text pointer-events-auto"
                                                 onPointerDown={(e) => {
+                                                    if (!selectedIds.includes(el.id)) return;
                                                     e.stopPropagation();
-                                                    if (selectedIds.includes(el.id)) e.currentTarget.focus();
+                                                    const target = e.currentTarget;
+                                                    setTimeout(() => target.focus(), 10);
+                                                }}
+                                                onFocus={(e) => {
+                                                    const range = document.createRange();
+                                                    const sel = window.getSelection();
+                                                    range.selectNodeContents(e.currentTarget);
+                                                    sel?.removeAllRanges();
+                                                    sel?.addRange(range);
                                                 }}
                                                 onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                             >
@@ -704,7 +793,19 @@ const Studio = () => {
                                         <span
                                             contentEditable suppressContentEditableWarning
                                             className="text-2xl font-black outline-none select-text cursor-text pointer-events-auto"
-                                            onPointerDown={(e) => { e.stopPropagation(); if (selectedIds.includes(el.id)) e.currentTarget.focus(); }}
+                                            onPointerDown={(e) => {
+                                                if (!selectedIds.includes(el.id)) return;
+                                                e.stopPropagation();
+                                                const target = e.currentTarget;
+                                                setTimeout(() => target.focus(), 10);
+                                            }}
+                                            onFocus={(e) => {
+                                                const range = document.createRange();
+                                                const sel = window.getSelection();
+                                                range.selectNodeContents(e.currentTarget);
+                                                sel?.removeAllRanges();
+                                                sel?.addRange(range);
+                                            }}
                                             onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                         >
                                             {el.props.text || '85%'}
@@ -768,8 +869,17 @@ const Studio = () => {
                                         className="text-2xl font-black outline-none mt-1 select-text cursor-text pointer-events-auto relative z-10"
                                         style={{ color: el.props.textColor || el.props.color || '#ffffff' }}
                                         onPointerDown={(e) => {
+                                            if (!selectedIds.includes(el.id)) return;
                                             e.stopPropagation();
-                                            if (selectedIds.includes(el.id)) e.currentTarget.focus();
+                                            const target = e.currentTarget;
+                                            setTimeout(() => target.focus(), 10);
+                                        }}
+                                        onFocus={(e) => {
+                                            const range = document.createRange();
+                                            const sel = window.getSelection();
+                                            range.selectNodeContents(e.currentTarget);
+                                            sel?.removeAllRanges();
+                                            sel?.addRange(range);
                                         }}
                                         onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                     >
@@ -779,19 +889,89 @@ const Studio = () => {
                             )}
 
                             {el.type === 'text' && (
-                                <h2
-                                    contentEditable
-                                    suppressContentEditableWarning
-                                    className={`font-black outline-none cursor-text select-text pointer-events-auto drop-shadow-lg min-w-[100px] text-center ${el.props.variant === 'heading' ? 'text-6xl' : el.props.variant === 'caption' ? 'text-xl font-normal tracking-wide' : 'text-4xl'}`}
-                                    style={{ color: el.props.textColor || el.props.color || '#ffffff', fontFamily }}
-                                    onPointerDown={(e) => {
-                                        e.stopPropagation();
-                                        if (selectedIds.includes(el.id)) e.currentTarget.focus();
+                                <motion.div
+                                    animate={el.props.variant === 'animated' ? {
+                                        y: [0, -10, 0],
+                                        rotate: [0, 1, -1, 0]
+                                    } : {}}
+                                    transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }}
+                                    className={`
+                                        flex flex-col items-center justify-center transition-all duration-300
+                                        ${el.props.variant === 'glass' ? 'p-10 backdrop-blur-3xl bg-white/5 border border-white/10 rounded-[40px] shadow-[0_30px_70px_-15px_rgba(0,0,0,0.5)] relative overflow-hidden before:absolute before:inset-0 before:bg-gradient-to-br before:from-white/10 before:to-transparent' : ''}
+                                        ${el.props.variant === 'solid' || !el.props.variant || el.props.variant === 'default' ? 'p-10 bg-[#111317] border border-white/5 rounded-[40px] shadow-2xl overflow-hidden' : ''}
+                                        ${el.props.variant === '3d' ? 'p-10 bg-[#1a1c21] rounded-[40px] border-b-[12px] border-black/40 shadow-[0_30px_60px_-10px_rgba(0,0,0,0.7)] border-x-2 border-t-2 border-white/5' : ''}
+                                        ${el.props.variant === 'outline' ? 'p-10 border-2 border-current rounded-[40px] border-dashed opacity-80' : ''}
+                                        ${el.props.variant === 'neon' ? 'relative after:absolute after:inset-0 after:bg-primary/20 after:blur-[100px] after:-z-10' : ''}
+                                        ${el.props.variant === 'none' ? 'bg-transparent border-none p-0' : ''}
+                                    `}
+                                    style={{
+                                        backgroundColor: (el.props.variant === 'glass' || el.props.variant === 'solid' || el.props.variant === '3d' || !el.props.variant || el.props.variant === 'default') ? (el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'default' || !el.props.variant) ? 'rgba(255,255,255,0.05)' : undefined) : 'transparent',
+                                        minWidth: (el.props.variant === 'glass' || el.props.variant === 'solid' || el.props.variant === '3d' || !el.props.variant || el.props.variant === 'default') ? '280px' : 'none',
+                                        color: el.props.variant === 'outline' ? (el.props.textColor || el.props.color || '#ffffff') : undefined
                                     }}
-                                    onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                 >
-                                    {el.props.text || 'Edit Me'}
-                                </h2>
+                                    <h2
+                                        contentEditable
+                                        suppressContentEditableWarning
+                                        className={`
+                                            font-black outline-none cursor-text select-text pointer-events-auto text-center relative z-10
+                                            ${el.props.variant === 'heading' ? 'text-7xl tracking-tighter leading-[0.9]' : ''}
+                                            ${el.props.variant === 'caption' ? 'text-xl font-medium tracking-[0.3em] uppercase opacity-70' : ''}
+                                            ${!el.props.variant || el.props.variant === 'default' ? 'text-5xl tracking-tight' : ''}
+                                            ${el.props.variant === 'neon' ? 'text-6xl drop-shadow-[0_0_25px_rgba(23,161,207,1)]' : ''}
+                                            ${el.props.variant === '3d' ? 'text-6xl drop-shadow-[0_4px_8px_rgba(0,0,0,0.8)]' : ''}
+                                        `}
+                                        style={{
+                                            color: el.props.textColor || el.props.color || '#ffffff',
+                                            fontFamily,
+                                            userSelect: 'text',
+                                            WebkitUserSelect: 'text'
+                                        }}
+                                        onPointerDown={(e) => {
+                                            if (!selectedIds.includes(el.id)) return;
+                                            e.stopPropagation();
+                                            const target = e.currentTarget;
+                                            setTimeout(() => target.focus(), 10);
+                                        }}
+                                        onFocus={(e) => {
+                                            const range = document.createRange();
+                                            const sel = window.getSelection();
+                                            range.selectNodeContents(e.currentTarget);
+                                            sel?.removeAllRanges();
+                                            sel?.addRange(range);
+                                        }}
+                                        onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
+                                    >
+                                        {el.props.text || 'Edit Me'}
+                                    </h2>
+                                    {(el.props.variant === 'glass' || el.props.variant === '3d' || el.props.variant === 'solid') && (
+                                        <div className="flex items-center gap-2 mt-6 opacity-30">
+                                            <div className="h-px w-8 bg-current"></div>
+                                            <p
+                                                contentEditable
+                                                suppressContentEditableWarning
+                                                className="text-[10px] font-black uppercase tracking-[0.2em] outline-none cursor-text select-text pointer-events-auto"
+                                                onPointerDown={(e) => {
+                                                    if (!selectedIds.includes(el.id)) return;
+                                                    e.stopPropagation();
+                                                    const target = e.currentTarget;
+                                                    setTimeout(() => target.focus(), 10);
+                                                }}
+                                                onFocus={(e) => {
+                                                    const range = document.createRange();
+                                                    const sel = window.getSelection();
+                                                    range.selectNodeContents(e.currentTarget);
+                                                    sel?.removeAllRanges();
+                                                    sel?.addRange(range);
+                                                }}
+                                                onBlur={(e) => updateElement(el.id, { props: { label: e.currentTarget.innerText } })}
+                                            >
+                                                {el.props.label || 'Design Studio'}
+                                            </p>
+                                            <div className="h-px w-8 bg-current"></div>
+                                        </div>
+                                    )}
+                                </motion.div>
                             )}
 
                             {el.type === 'sticker' && (
@@ -815,7 +995,20 @@ const Studio = () => {
                                     <span
                                         contentEditable
                                         suppressContentEditableWarning
-                                        className="outline-none cursor-text"
+                                        className="outline-none cursor-text select-text pointer-events-auto"
+                                        onPointerDown={(e) => {
+                                            if (!selectedIds.includes(el.id)) return;
+                                            e.stopPropagation();
+                                            const target = e.currentTarget;
+                                            setTimeout(() => target.focus(), 10);
+                                        }}
+                                        onFocus={(e) => {
+                                            const range = document.createRange();
+                                            const sel = window.getSelection();
+                                            range.selectNodeContents(e.currentTarget);
+                                            sel?.removeAllRanges();
+                                            sel?.addRange(range);
+                                        }}
                                         onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                     >
                                         {el.props.text || 'NEW'}
@@ -1181,7 +1374,19 @@ const Studio = () => {
                                         {selectedEl.type === 'sticker' && <><option value="tape">Tape</option><option value="stamp">Stamp</option><option value="tag">Tag</option></>}
                                         {selectedEl.type === 'stat' && <><option value="minimal">Minimal</option><option value="pill">Pill</option><option value="graph">Graph</option></>}
                                         {selectedEl.type === 'bubble' && <><option value="solid">Solid</option><option value="glass">Glass (Glassmorphism)</option><option value="user">User</option></>}
-                                        {selectedEl.type === 'text' && <><option value="heading">Heading</option><option value="caption">Caption</option></>}
+                                        {selectedEl.type === 'text' && (
+                                            <>
+                                                <option value="heading">Heading</option>
+                                                <option value="caption">Caption</option>
+                                                <option value="glass">Glass Card</option>
+                                                <option value="solid">Solid Card</option>
+                                                <option value="3d">3D Depth</option>
+                                                <option value="outline">Outline</option>
+                                                <option value="neon">Neon Glow</option>
+                                                <option value="animated">Animated Flow</option>
+                                                <option value="none">No Background</option>
+                                            </>
+                                        )}
                                     </select>
                                 </div>
                             )}
@@ -1199,15 +1404,15 @@ const Studio = () => {
                                         placeholder="Type something..."
                                     />
                                 </div>
-                                {selectedEl.type === 'stat' && (
+                                {(selectedEl.type === 'stat' || selectedEl.type === 'bubble' || selectedEl.type === 'text') && (
                                     <div className="space-y-2">
-                                        <label className="text-[10px] font-bold text-[#9db2b8] uppercase">Label Text</label>
+                                        <label className="text-[10px] font-bold text-[#9db2b8] uppercase">{selectedEl.type === 'stat' ? 'Label Text' : 'Subtitle'}</label>
                                         <input
                                             type="text"
                                             value={selectedEl.props.label || ''}
                                             onChange={(e) => updateMultipleElements(selectedIds, { props: { label: e.target.value } })}
                                             className="w-full h-9 px-3 bg-surface-dark border border-border-dark rounded text-xs text-white focus:outline-none focus:border-primary"
-                                            placeholder="Label (e.g. Revenue)"
+                                            placeholder={selectedEl.type === 'stat' ? "Label (e.g. Revenue)" : selectedEl.type === 'text' ? "Sub-label (e.g. Design Studio)" : "Subtitle (e.g. Tap to open)"}
                                         />
                                     </div>
                                 )}
@@ -1585,7 +1790,7 @@ const Studio = () => {
                 </div>
             </main>
 
-            <aside className="hidden lg:flex w-80 border-l border-border-dark flex-col bg-surface-dark/40 backdrop-blur-xl shrink-0 z-20">
+            <aside className="hidden md:flex w-80 border-l border-border-dark flex-col bg-surface-dark/40 backdrop-blur-xl shrink-0 z-20">
                 <div className="flex items-center px-6 py-4 border-b border-border-dark h-[53px]">
                     <span className="text-xs font-bold tracking-widest uppercase text-slate-400">
                         {selectedIds.length > 0 ? 'Properties' : 'Library'}
@@ -1600,3 +1805,4 @@ const Studio = () => {
 };
 
 export default Studio;
+

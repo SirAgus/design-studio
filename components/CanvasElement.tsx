@@ -72,8 +72,11 @@ const CanvasElement = ({ id, type, data, isSelected, onSelect, onUpdate, onDelet
             }}
             className="group absolute"
         >
-            <div className={`relative cursor-move transition-all duration-200 ${isSelected ? 'ring-1 ring-primary/50' : 'hover:ring-1 hover:ring-white/30'}`}>
-                {children}
+            <div className={`relative transition-all duration-200 ${isSelected ? 'ring-1 ring-primary/50' : 'hover:ring-1 hover:ring-white/30'}`}>
+                {/* Pointer events wrapper for children */}
+                <div className="relative">
+                    {children}
+                </div>
 
                 {isSelected && (
                     <>
