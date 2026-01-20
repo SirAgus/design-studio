@@ -10,7 +10,7 @@ import SavingsTemplate from './templates/SavingsTemplate';
 import AnalyticsTemplate from './templates/AnalyticsTemplate';
 import BlankTemplate from './templates/BlankTemplate';
 import CanvasElement from './CanvasElement';
-import html2canvas from 'html2canvas';
+// html2canvas removed in favor of html-to-image
 
 // Google Fonts
 if (typeof document !== 'undefined') {
@@ -309,102 +309,73 @@ const Studio = () => {
         const element = document.getElementById('capture-target');
         if (!element) return;
 
-        // Deselect everything for capture
         setSelectedIds([]);
-
         setIsExporting(true);
+
         try {
-            await new Promise(resolve => setTimeout(resolve, 500)); // Wait for render and selection UI to hide
-
-            const canvas = await html2canvas(element, {
-                scale: 3,
-                useCORS: true,
-                allowTaint: false,
-                backgroundColor: null,
-                logging: true,
-                width: element.scrollWidth,
-                height: element.scrollHeight,
-                x: 0,
-                y: 0,
-                scrollX: 0,
-                scrollY: 0,
-                windowWidth: document.documentElement.offsetWidth,
-                windowHeight: document.documentElement.offsetHeight,
-                onclone: (doc) => {
-                    const el = doc.getElementById('capture-target');
-                    if (el) {
-                        el.style.transform = 'none';
-                        el.style.boxShadow = 'none';
-                        el.style.filter = 'none';
-                        el.style.margin = '0';
-                        el.style.padding = '0';
-                        el.style.left = '0';
-                        el.style.top = '0';
-                    }
-
-                    // Robust nested paren regex for complex CSS functions
-                    const nestedRegex = (fn: string) => new RegExp(`${fn}\\s*\\((?:[^)(]|\\((?:[^)(]|\\([^)(]*\\))*\\))*\\)`, 'gi');
-
-                    const nuclearSanitize = (text: string) => {
-                        if (!text) return text;
-                        return text
-                            .replace(nestedRegex('oklch'), '#ffffff')
-                            .replace(nestedRegex('oklab'), '#ffffff')
-                            .replace(nestedRegex('color-mix'), '#333333')
-                            .replace(nestedRegex('light-dark'), '#ffffff')
-                            .replace(nestedRegex('lab'), '#ffffff')
-                            .replace(nestedRegex('lch'), '#ffffff')
-                            .replace(nestedRegex('hwb'), '#ffffff');
-                    };
-
-                    // 1. Sanitize all style tags
-                    const styles = doc.getElementsByTagName('style');
-                    for (let i = 0; i < styles.length; i++) {
-                        try {
-                            if (styles[i].innerHTML) {
-                                styles[i].innerHTML = nuclearSanitize(styles[i].innerHTML);
-                            }
-                        } catch (e) { }
-                    }
-
-                    // 2. Sanitize all inline styles and SVG attributes
-                    const all = doc.getElementsByTagName('*');
-                    for (let i = 0; i < all.length; i++) {
-                        const node = all[i] as HTMLElement;
-                        try {
-                            if (node.style && node.style.cssText) {
-                                node.style.cssText = nuclearSanitize(node.style.cssText);
-                            }
-                            ['fill', 'stroke', 'style'].forEach(attr => {
-                                if (node.hasAttribute(attr)) {
-                                    node.setAttribute(attr, nuclearSanitize(node.getAttribute(attr) || ''));
-                                }
-                            });
-                        } catch (e) { }
-                    }
-
-                    // 3. DO NOT remove links, instead inject a global override for oklab variables
-                    // that often crash html2canvas when parsed from the stylesheet context
-                    const override = doc.createElement('style');
-                    override.innerHTML = `
-                        * { 
-                            --tw-ring-color: transparent !important;
-                            --tw-shadow-color: transparent !important;
-                            --tw-outline-color: transparent !important;
-                            --tw-ring-offset-color: transparent !important;
-                        }
-                    `;
-                    doc.head.appendChild(override);
-                }
+            // 1. REQUEST SMART SCREEN CAPTURE
+            // This is the ONLY way to get 100% CSS fidelity (blurs, gradients, etc.)
+            const stream = await navigator.mediaDevices.getDisplayMedia({
+                video: {
+                    displaySurface: "browser",
+                    // @ts-ignore
+                    logicalSurface: true,
+                    cursor: "never"
+                },
+                audio: false
             });
 
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.play();
+
+            // Wait for video to be ready
+            await new Promise(resolve => (video.onplaying = resolve));
+            // Small delay to ensure any transient UI (like the sharing bar) is settled
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // 2. CALCULATE CROP AREA
+            const rect = element.getBoundingClientRect();
+            // We need to account for device pixel ratio for super-sharpness
+            const dpr = window.devicePixelRatio || 1;
+
+            const canvas = document.createElement('canvas');
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            const ctx = canvas.getContext('2d');
+
+            if (!ctx) throw new Error("Could not create canvas context");
+
+            // 3. CAPTURE & CROP
+            // We capture the frame from the video stream
+            // Note: We need to find where the element is relative to the viewport
+            // and where the viewport is relative to the captured stream.
+            // Since getDisplayMedia captures the TAB, the coordinates align.
+            ctx.drawImage(
+                video,
+                rect.left * (video.videoWidth / window.innerWidth),
+                rect.top * (video.videoHeight / window.innerHeight),
+                rect.width * (video.videoWidth / window.innerWidth),
+                rect.height * (video.videoHeight / window.innerHeight),
+                0, 0, canvas.width, canvas.height
+            );
+
+            // 4. DOWNLOAD
+            const dataUrl = canvas.toDataURL('image/png', 1.0);
             const link = document.createElement('a');
             link.download = `${activeTemplate || 'design'}-${new Date().getTime()}.png`;
-            link.href = canvas.toDataURL('image/png', 1.0);
+            link.href = dataUrl;
             link.click();
+
+            // 5. CLEANUP
+            stream.getTracks().forEach(track => track.stop());
+            video.remove();
+
         } catch (err: any) {
-            console.error('Export failed:', err);
-            alert(`Failed to export image: ${err.message || 'Check console for details'}. Please try again.`);
+            console.error('Screen capture failed:', err);
+            if (err.name !== 'NotAllowedError') { // Don't alert if user just cancelled
+                alert(`Pixel-Perfect Export failed: ${err.message}. Please try again.`);
+            }
         } finally {
             setIsExporting(false);
         }
@@ -1665,26 +1636,43 @@ const Studio = () => {
                             className="relative border border-border-dark rounded-xl overflow-hidden shadow-2xl transition-all duration-300"
                             onPointerDown={(e) => e.stopPropagation()}
                             style={{
-                                backgroundColor: backgroundConfig.type === 'solid' ? backgroundConfig.value :
-                                    backgroundConfig.type === 'grid' ? '#000000' :
-                                        undefined,
-                                backgroundImage: backgroundConfig.type === 'gradient' ? `linear-gradient(135deg, ${backgroundConfig.value.split(',')[0]}, ${backgroundConfig.value.split(',')[1] || '#000000'})` :
-                                    backgroundConfig.type === 'grid' ? `radial-gradient(circle at 1px 1px, ${backgroundConfig.value} 1px, transparent 0)` :
-                                        backgroundConfig.type === 'pattern' ? (
-                                            backgroundConfig.value === 'Waves' ? 'url("https://www.transparenttextures.com/patterns/wavecut.png")' :
-                                                backgroundConfig.value === 'ZigZag' ? 'url("https://www.transparenttextures.com/patterns/shattered.png")' :
-                                                    backgroundConfig.value === 'Dots' ? 'url("https://www.transparenttextures.com/patterns/micro-carbon.png")' :
-                                                        'url("https://www.transparenttextures.com/patterns/carbon-fibre.png")'
-                                        ) : undefined,
-                                backgroundSize: backgroundConfig.type === 'grid' ? '24px 24px' : backgroundConfig.type === 'pattern' ? '100px 100px' : undefined
+                                width: '100%',
+                                minHeight: '600px',
+                                backgroundColor: backgroundConfig.type === 'solid' ? backgroundConfig.value : '#000000',
                             }}
                         >
-                            {/* Grid Overlay for opacity control if type is grid or pattern */}
+                            {/* Robust Multi-layer Background System */}
+                            <div
+                                className="absolute inset-0 pointer-events-none"
+                                style={{
+                                    zIndex: 0,
+                                    backgroundImage: backgroundConfig.type === 'gradient' ?
+                                        `linear-gradient(135deg, ${backgroundConfig.value.split(',')[0]}, ${backgroundConfig.value.split(',')[1] || '#000000'})` :
+                                        'none',
+                                }}
+                            />
+
                             {(backgroundConfig.type === 'grid' || backgroundConfig.type === 'pattern') && (
-                                <div className="absolute inset-0 pointer-events-none" style={{ backgroundColor: `rgba(0,0,0,${1 - (backgroundConfig.opacity || 0.1)})`, mixBlendMode: 'multiply' }}></div>
+                                <div
+                                    className="absolute inset-0 pointer-events-none"
+                                    style={{
+                                        zIndex: 1,
+                                        opacity: backgroundConfig.opacity || 0.1,
+                                        backgroundImage: backgroundConfig.type === 'grid' ?
+                                            `radial-gradient(circle at 1px 1px, ${backgroundConfig.value} 1px, transparent 0)` :
+                                            (backgroundConfig.value === 'Waves' ? 'url("https://www.transparenttextures.com/patterns/wavecut.png")' :
+                                                backgroundConfig.value === 'ZigZag' ? 'url("https://www.transparenttextures.com/patterns/shattered.png")' :
+                                                    backgroundConfig.value === 'Dots' ? 'url("https://www.transparenttextures.com/patterns/micro-carbon.png")' :
+                                                        'url("https://www.transparenttextures.com/patterns/carbon-fibre.png")'),
+                                        backgroundSize: backgroundConfig.type === 'grid' ? '24px 24px' : '100px 100px'
+                                    }}
+                                />
                             )}
-                            {renderActiveTemplate()}
-                            {renderCustomElements()}
+
+                            <div className="relative z-10 w-full h-full">
+                                {renderActiveTemplate()}
+                                {renderCustomElements()}
+                            </div>
                         </div>
                     ) : (
                         <div className="w-full max-w-6xl space-y-12">
