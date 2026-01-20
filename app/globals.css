@@ -46,3 +46,7 @@
 .glow-border {
     box-shadow: 0 0 15px rgba(11, 201, 218, 0.2);
 }
+
+.clip-triangle {
+    clip-path: polygon(50% 0%, 0% 100%, 100% 100%);
+}

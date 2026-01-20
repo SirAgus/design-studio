@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 
 const SavingsTemplate = () => {
     return (
-        <div className="relative w-[1200px] h-[800px] bg-[#f9fafa] dark:bg-[#21262c] font-display text-[#101818] dark:text-white selection:bg-[#00c7ba]/30 overflow-hidden flex flex-col">
+        <div className="relative w-full h-full bg-[#f9fafa] dark:bg-[#21262c] font-display text-[#101818] dark:text-white selection:bg-[#00c7ba]/30 overflow-hidden flex flex-col">
             {/* Scope specific styles */}
             <style jsx global>{`
         .template-3-primary { color: #00c7ba; }

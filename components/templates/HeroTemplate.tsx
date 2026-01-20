@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 
 const HeroTemplate = () => {
     return (
-        <div className="relative w-[1200px] h-[800px] bg-[#16181d] font-display text-white selection:bg-[#0bc9da] selection:text-[#16181d] overflow-hidden flex flex-col items-center justify-center">
+        <div className="relative w-full h-full bg-[#16181d] font-display text-white selection:bg-[#0bc9da] selection:text-[#16181d] overflow-hidden flex flex-col items-center justify-center">
             {/* Scope specific styles for this template that might conflict/differ */}
             <style jsx global>{`
         .template-1-primary { color: #0bc9da; }

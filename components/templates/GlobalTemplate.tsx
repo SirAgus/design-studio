@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 
 const GlobalTemplate = () => {
     return (
-        <div className="relative w-[1200px] h-[800px] bg-[#f9fafa] dark:bg-[#111317] font-display text-slate-900 dark:text-white selection:bg-[#00c7ba]/30 overflow-hidden flex flex-col">
+        <div className="relative w-full h-full bg-[#f9fafa] dark:bg-[#111317] font-display text-slate-900 dark:text-white selection:bg-[#00c7ba]/30 overflow-hidden flex flex-col">
             {/* Scope specific styles */}
             <style jsx global>{`
         .template-2-primary { color: #00c7ba; }

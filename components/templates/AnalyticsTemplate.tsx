@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 
 const AnalyticsTemplate = () => {
     return (
-        <div className="relative w-[1200px] h-[800px] bg-[#f9fafa] dark:bg-[#16191d] font-display text-slate-900 dark:text-slate-100 overflow-hidden flex">
+        <div className="relative w-full h-full bg-[#f9fafa] dark:bg-[#16191d] font-display text-slate-900 dark:text-slate-100 overflow-hidden flex">
             {/* Scope specific styles */}
             <style jsx global>{`
         .template-4-primary { color: #00c7ba; }

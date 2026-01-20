@@ -10,14 +10,29 @@ import SavingsTemplate from './templates/SavingsTemplate';
 import AnalyticsTemplate from './templates/AnalyticsTemplate';
 import BlankTemplate from './templates/BlankTemplate';
 import CanvasElement from './CanvasElement';
-// html2canvas removed in favor of html-to-image
+import { screenshot } from '@renoun/screenshot';
+// html2canvas removed in favor of @renoun/screenshot
 
 // Google Fonts
-if (typeof document !== 'undefined') {
+// Google Fonts & Global Styles
+if (typeof window !== 'undefined') {
     const link = document.createElement('link');
-    link.href = 'https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Outfit:wght@400;600;800&family=Montserrat:wght@400;700;900&display=swap';
+    link.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Roboto+Mono:wght@400;700&family=Space+Grotesk:wght@400;700&family=Syne:wght@400;700;800&family=Outfit:wght@300;400;700;900&family=Montserrat:wght@400;700;900&display=swap';
     link.rel = 'stylesheet';
     document.head.appendChild(link);
+
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-20px); }
+        }
+        .capture-target * {
+            -webkit-print-color-adjust: exact !important;
+            color-adjust: exact !important;
+        }
+    `;
+    document.head.appendChild(style);
 }
 
 type TemplateId = 'Hero' | 'Global' | 'Savings' | 'Analytics' | 'CTA' | 'Blank';
@@ -43,15 +58,30 @@ type DeviceModel =
     | 'iPad Mini'
     | 'MacBook Pro';
 
-type BackgroundConfig = {
-    type: 'solid' | 'gradient' | 'grid' | 'pattern';
-    value: string; // solid: hex, gradient: 'hex1,hex2', grid: hex, pattern: 'ThemeName'
-    opacity?: number;
+type CanvasBackground = {
+    type: 'solid' | 'image' | 'mesh';
+    value: string; // solid: hex, image: dataUrl, mesh: JSON of BackgroundPoint[]
+    opacity: number;
+};
+
+type BackgroundPoint = {
+    id: string;
+    x: number;
+    y: number;
+    color: string;
+    scale: number;
+    blur: number;
+};
+
+type CanvasOverlay = {
+    type: 'none' | 'grid' | 'dots' | 'pattern' | 'gradient';
+    value: string; // grid/dots: color, pattern: ThemeName, gradient: 'hex1,hex2'
+    opacity: number;
 };
 
 type CustomElement = {
     id: string;
-    type: 'phone' | 'bubble' | 'stat' | 'text' | 'sticker' | 'icon' | 'graphics' | 'group' | 'message-stack' | 'avatar-group' | 'grid-menu' | 'chart' | 'progress-circle';
+    type: 'phone' | 'bubble' | 'stat' | 'text' | 'sticker' | 'icon' | 'graphics' | 'group' | 'message-stack' | 'avatar-group' | 'grid-menu' | 'chart' | 'progress-circle' | 'shape';
     x: number;
     y: number;
     scale: number;
@@ -68,9 +98,12 @@ type CustomElement = {
         label?: string;
         icon?: string;
         showIcon?: boolean;
+        borderColor?: string;
+        variant?: string;
+        path?: string;
+        strokeWidth?: number;
         shadow?: boolean;
         font?: string;
-        variant?: string;
         children?: CustomElement[];
         parentId?: string;
     };
@@ -94,8 +127,9 @@ type ProjectVersion = {
     timestamp: string;
     data: {
         activeTemplate: TemplateId | null;
-        customElements: CustomElement[];
-        backgroundConfig: BackgroundConfig;
+        elements_state: CustomElement[];
+        canvasBackground: CanvasBackground;
+        canvasOverlay: CanvasOverlay;
     };
 };
 
@@ -110,22 +144,54 @@ const STORAGE_KEY = 'design-studio-v2-state';
 
 const Studio = () => {
     const [activeTemplate, setActiveTemplate] = useState<TemplateId | null>(null);
-    const [backgroundConfig, setBackgroundConfig] = useState<BackgroundConfig>({ type: 'grid', value: '#16181d', opacity: 0.1 });
+    const [canvasBackground, setCanvasBackground] = useState<CanvasBackground>({ type: 'solid', value: '#121417', opacity: 1 });
+    const [canvasOverlay, setCanvasOverlay] = useState<CanvasOverlay>({ type: 'grid', value: '#1da1f2', opacity: 0.1 });
     const [isExporting, setIsExporting] = useState(false);
-    const [customElements, setCustomElements] = useState<CustomElement[]>([]);
+    const [elements_state, setElementsState] = useState<CustomElement[]>([]);
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const [isLoaded, setIsLoaded] = useState(false);
+    const [exportFormat, setExportFormat] = useState<'png' | 'jpeg' | 'webp'>('png');
+    const [exportOrientation, setExportOrientation] = useState<'portrait' | 'landscape'>('landscape');
 
     // New: Saved Projects System
     const [savedProjects, setSavedProjects] = useState<SavedProject[]>([]);
     const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
     const [sidebarTab, setSidebarTab] = useState<'templates' | 'projects'>('templates');
     const [iconSearch, setIconSearch] = useState('');
+
     const PROJECTS_KEY = 'design-studio-projects';
 
-    // File Input Ref for Phone Image
+    // Layout State
+    const [baseScale, setBaseScale] = useState(1);
+    const [userZoom, setUserZoom] = useState(1);
+    const canvasScale = baseScale * userZoom;
+    const containerRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const projectInputRef = useRef<HTMLInputElement>(null); // Ref for loading project
+    const bgImageInputRef = useRef<HTMLInputElement>(null);
+    const projectInputRef = useRef<HTMLInputElement>(null);
+
+    // Responsive Canvas
+    useEffect(() => {
+        const updateScale = () => {
+            if (!containerRef.current) return;
+            const container = containerRef.current;
+            const targetW = exportOrientation === 'landscape' ? 1280 : 720;
+            const targetH = exportOrientation === 'landscape' ? 720 : 1280;
+
+            const scaleW = (container.offsetWidth - 100) / targetW;
+            const scaleH = (container.offsetHeight - 100) / targetH;
+            setBaseScale(Math.min(scaleW, scaleH, 1));
+        };
+
+        updateScale();
+        const obs = new ResizeObserver(updateScale);
+        if (containerRef.current) obs.observe(containerRef.current);
+        window.addEventListener('resize', updateScale);
+        return () => {
+            obs.disconnect();
+            window.removeEventListener('resize', updateScale);
+        }
+    }, [exportOrientation]);
 
     // Persistence: Load
     useEffect(() => {
@@ -135,8 +201,14 @@ const Studio = () => {
             try {
                 const parsed = JSON.parse(saved);
                 if (parsed.activeTemplate) setActiveTemplate(parsed.activeTemplate);
-                if (parsed.customElements) setCustomElements(parsed.customElements);
-                if (parsed.backgroundConfig) setBackgroundConfig(parsed.backgroundConfig);
+                if (parsed.elements_state) setElementsState(parsed.elements_state);
+                if (parsed.canvasBackground) setCanvasBackground(parsed.canvasBackground);
+                if (parsed.canvasOverlay) setCanvasOverlay(parsed.canvasOverlay);
+                // legacy support
+                if (parsed.backgroundConfig) {
+                    setCanvasBackground({ type: 'solid', value: parsed.backgroundConfig.value, opacity: 1 });
+                    setCanvasOverlay({ type: parsed.backgroundConfig.type === 'grid' || parsed.backgroundConfig.type === 'pattern' ? parsed.backgroundConfig.type as any : 'none', value: parsed.backgroundConfig.value, opacity: 0.1 });
+                }
             } catch (e) {
                 console.error("Failed to load state", e);
             }
@@ -158,15 +230,16 @@ const Studio = () => {
         if (!isLoaded) return;
         const state = {
             activeTemplate,
-            customElements,
-            backgroundConfig
+            elements_state,
+            canvasBackground,
+            canvasOverlay
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    }, [activeTemplate, customElements, backgroundConfig, isLoaded]);
+    }, [activeTemplate, elements_state, canvasBackground, canvasOverlay, isLoaded]);
 
     // Layer Management
     const moveToFront = (id: string) => {
-        setCustomElements(prev => {
+        setElementsState(prev => {
             const index = prev.findIndex(el => el.id === id);
             if (index === -1) return prev;
             const newArr = [...prev];
@@ -177,7 +250,7 @@ const Studio = () => {
     };
 
     const moveToBack = (id: string) => {
-        setCustomElements(prev => {
+        setElementsState(prev => {
             const index = prev.findIndex(el => el.id === id);
             if (index === -1) return prev;
             const newArr = [...prev];
@@ -200,7 +273,7 @@ const Studio = () => {
                     id: Math.random().toString(36).substr(2, 9),
                     name: message,
                     timestamp: new Date().toISOString(),
-                    data: { activeTemplate, customElements, backgroundConfig }
+                    data: { activeTemplate, elements_state, canvasBackground, canvasOverlay }
                 };
 
                 const updatedProjects = [...savedProjects];
@@ -221,7 +294,7 @@ const Studio = () => {
             id: Math.random().toString(36).substr(2, 9),
             name: 'Initial Commit',
             timestamp: new Date().toISOString(),
-            data: { activeTemplate, customElements, backgroundConfig }
+            data: { activeTemplate, elements_state, canvasBackground, canvasOverlay }
         };
 
         const newProject: SavedProject = {
@@ -241,10 +314,14 @@ const Studio = () => {
     const loadVersion = (project: SavedProject, version: ProjectVersion) => {
         if (confirm(`Load "${project.name} - ${version.name}"? Unsaved changes will be lost.`)) {
             setActiveTemplate(version.data.activeTemplate);
-            setCustomElements(version.data.customElements);
-            setBackgroundConfig(version.data.backgroundConfig);
+            setElementsState(version.data.elements_state);
+            if (version.data.canvasBackground) setCanvasBackground(version.data.canvasBackground);
+            if (version.data.canvasOverlay) setCanvasOverlay(version.data.canvasOverlay);
+            // legacy support
+            if ((version.data as any).backgroundConfig) {
+                setCanvasBackground({ type: 'solid', value: (version.data as any).backgroundConfig.value, opacity: 1 });
+            }
             setCurrentProjectId(project.id);
-            // alert(`Loaded: ${version.name}`);
         }
     };
 
@@ -264,8 +341,9 @@ const Studio = () => {
             version: '2.0',
             timestamp: new Date().toISOString(),
             activeTemplate,
-            customElements,
-            backgroundConfig
+            elements_state,
+            canvasBackground,
+            canvasOverlay
         };
         const blob = new Blob([JSON.stringify(projectState, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -287,10 +365,15 @@ const Studio = () => {
                 const parsed = JSON.parse(result);
 
                 // Basic validation
-                if (parsed.customElements && Array.isArray(parsed.customElements)) {
-                    setCustomElements(parsed.customElements);
+                if (parsed.elements_state && Array.isArray(parsed.elements_state)) {
+                    setElementsState(parsed.elements_state);
                     if (parsed.activeTemplate) setActiveTemplate(parsed.activeTemplate);
-                    if (parsed.backgroundConfig) setBackgroundConfig(parsed.backgroundConfig);
+                    if (parsed.canvasBackground) setCanvasBackground(parsed.canvasBackground);
+                    if (parsed.canvasOverlay) setCanvasOverlay(parsed.canvasOverlay);
+                    // legacy support
+                    if (parsed.backgroundConfig) {
+                        setCanvasBackground({ type: 'solid', value: parsed.backgroundConfig.value, opacity: 1 });
+                    }
                     alert('Project loaded successfully!');
                 } else {
                     alert('Invalid project file.');
@@ -309,73 +392,34 @@ const Studio = () => {
         const element = document.getElementById('capture-target');
         if (!element) return;
 
+        // Visual feedback
         setSelectedIds([]);
         setIsExporting(true);
 
         try {
-            // 1. REQUEST SMART SCREEN CAPTURE
-            // This is the ONLY way to get 100% CSS fidelity (blurs, gradients, etc.)
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-                video: {
-                    displaySurface: "browser",
-                    // @ts-ignore
-                    logicalSurface: true,
-                    cursor: "never"
-                },
-                audio: false
+            // Give the browser a moment to hide selection boxes
+            await new Promise(r => setTimeout(r, 300));
+
+            // Use html-to-image directly for "what you see is what you get"
+            const { toPng } = await import('html-to-image');
+
+            const dataUrl = await toPng(element, {
+                cacheBust: true,
+                pixelRatio: 3, // High DPI
+                backgroundColor: exportFormat === 'jpeg' ? '#000000' : 'transparent',
+                style: {
+                    transform: 'none', // Critical: Remove any container transforms during capture
+                }
             });
 
-            const video = document.createElement('video');
-            video.srcObject = stream;
-            video.play();
-
-            // Wait for video to be ready
-            await new Promise(resolve => (video.onplaying = resolve));
-            // Small delay to ensure any transient UI (like the sharing bar) is settled
-            await new Promise(resolve => setTimeout(resolve, 500));
-
-            // 2. CALCULATE CROP AREA
-            const rect = element.getBoundingClientRect();
-            // We need to account for device pixel ratio for super-sharpness
-            const dpr = window.devicePixelRatio || 1;
-
-            const canvas = document.createElement('canvas');
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            const ctx = canvas.getContext('2d');
-
-            if (!ctx) throw new Error("Could not create canvas context");
-
-            // 3. CAPTURE & CROP
-            // We capture the frame from the video stream
-            // Note: We need to find where the element is relative to the viewport
-            // and where the viewport is relative to the captured stream.
-            // Since getDisplayMedia captures the TAB, the coordinates align.
-            ctx.drawImage(
-                video,
-                rect.left * (video.videoWidth / window.innerWidth),
-                rect.top * (video.videoHeight / window.innerHeight),
-                rect.width * (video.videoWidth / window.innerWidth),
-                rect.height * (video.videoHeight / window.innerHeight),
-                0, 0, canvas.width, canvas.height
-            );
-
-            // 4. DOWNLOAD
-            const dataUrl = canvas.toDataURL('image/png', 1.0);
             const link = document.createElement('a');
             link.download = `${activeTemplate || 'design'}-${new Date().getTime()}.png`;
             link.href = dataUrl;
             link.click();
 
-            // 5. CLEANUP
-            stream.getTracks().forEach(track => track.stop());
-            video.remove();
-
         } catch (err: any) {
-            console.error('Screen capture failed:', err);
-            if (err.name !== 'NotAllowedError') { // Don't alert if user just cancelled
-                alert(`Pixel-Perfect Export failed: ${err.message}. Please try again.`);
-            }
+            console.error('Export failed:', err);
+            alert(`Export failed: ${err.message}. Please try again.`);
         } finally {
             setIsExporting(false);
         }
@@ -383,7 +427,7 @@ const Studio = () => {
 
     const addElement = (type: CustomElement['type']) => {
         const newId = Math.random().toString(36).substr(2, 9);
-        const offset = customElements.length * 20;
+        const offset = elements_state.length * 20;
 
         let defaultProps: CustomElement['props'] = {
             color: '#0bc9da',
@@ -406,7 +450,7 @@ const Studio = () => {
         if (type === 'icon') defaultProps = { ...defaultProps, text: 'star', iconColor: '#ffffff' };
         if (type === 'graphics') defaultProps = { ...defaultProps, text: '' };
 
-        setCustomElements([...customElements, {
+        setElementsState([...elements_state, {
             id: newId,
             type,
             x: 500 + offset,
@@ -421,7 +465,7 @@ const Studio = () => {
     const groupSelected = () => {
         if (selectedIds.length < 2) return;
         const newGroupId = `group-${Math.random().toString(36).substr(2, 9)}`;
-        setCustomElements(prev => prev.map(el => {
+        setElementsState(prev => prev.map(el => {
             if (selectedIds.includes(el.id)) {
                 return { ...el, props: { ...el.props, parentId: newGroupId } };
             }
@@ -431,12 +475,12 @@ const Studio = () => {
 
     const ungroupSelected = () => {
         const parentIds = [...new Set(
-            customElements
+            elements_state
                 .filter(el => selectedIds.includes(el.id) && el.props.parentId)
                 .map(el => el.props.parentId)
         )];
 
-        setCustomElements(prev => prev.map(el => {
+        setElementsState(prev => prev.map(el => {
             if (el.props.parentId && parentIds.includes(el.props.parentId)) {
                 return { ...el, props: { ...el.props, parentId: undefined } };
             }
@@ -445,7 +489,7 @@ const Studio = () => {
     };
 
     const updateElement = (id: string, updates: Partial<CustomElement> | { props: Partial<CustomElement['props']> }) => {
-        setCustomElements(prev => prev.map(el => {
+        setElementsState(prev => prev.map(el => {
             if (el.id !== id) return el;
 
             // Handle specialized Props update vs top-level fields
@@ -457,7 +501,7 @@ const Studio = () => {
     };
 
     const updateMultipleElements = (ids: string[], updates: Partial<CustomElement> | { props: Partial<CustomElement['props']> }) => {
-        setCustomElements(prev => prev.map(el => {
+        setElementsState(prev => prev.map(el => {
             if (!ids.includes(el.id)) return el;
 
             if ('props' in updates && updates.props) {
@@ -468,16 +512,16 @@ const Studio = () => {
     };
 
     const removeSelectedElements = () => {
-        setCustomElements(prev => prev.filter(el => !selectedIds.includes(el.id)));
+        setElementsState(prev => prev.filter(el => !selectedIds.includes(el.id)));
         setSelectedIds([]);
     };
 
     const toggleSelection = (id: string, e?: React.MouseEvent | React.PointerEvent) => {
-        const el = customElements.find(i => i.id === id);
+        const el = elements_state.find(i => i.id === id);
         const parentId = el?.props.parentId;
 
         const groupIds = parentId
-            ? customElements.filter(i => i.props.parentId === parentId).map(i => i.id)
+            ? elements_state.filter(i => i.props.parentId === parentId).map(i => i.id)
             : [id];
 
         if (e?.shiftKey) {
@@ -495,7 +539,7 @@ const Studio = () => {
     };
 
     const moveElements = (dx: number, dy: number) => {
-        setCustomElements(prev => prev.map(el => {
+        setElementsState(prev => prev.map(el => {
             if (selectedIds.includes(el.id)) {
                 return { ...el, x: el.x + dx, y: el.y + dy };
             }
@@ -504,7 +548,7 @@ const Studio = () => {
     };
 
     const removeElement = (id: string) => {
-        setCustomElements(customElements.filter(el => el.id !== id));
+        setElementsState(elements_state.filter(el => el.id !== id));
         setSelectedIds(prev => prev.filter(i => i !== id));
     };
 
@@ -537,13 +581,9 @@ const Studio = () => {
     if (!isLoaded) return null;
 
     const renderCustomElements = () => {
-        // Font Styles Injection
-        const fontImport = `@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=Roboto+Mono:wght@400;700&family=Space+Grotesk:wght@400;700&family=Syne:wght@400;700;800&family=Outfit:wght@300;400;700;900&family=Montserrat:wght@400;700;900&display=swap');`;
-
         return (
             <>
-                <style>{fontImport}</style>
-                {customElements.map(el => {
+                {elements_state.map(el => {
                     const model = el.props.model || 'iPhone 16 Pro';
                     const modernModels: DeviceModel[] = ['iPhone 16 Pro', 'iPhone 15 Pro', 'Galaxy S24 Ultra', 'Pixel 9 Pro'];
                     const isModern = modernModels.includes(model as DeviceModel);
@@ -574,137 +614,77 @@ const Studio = () => {
                     );
 
                     return (
-                        <CanvasElement
-                            key={el.id}
-                            id={el.id}
-                            type={el.type}
-                            data={{ x: el.x, y: el.y, scale: el.scale, rotation: el.rotation || 0 }}
-                            isSelected={selectedIds.includes(el.id)}
-                            onSelect={toggleSelection}
-                            onDragSelected={moveElements}
-                            onUpdate={(id, updates) => {
-                                if (selectedIds.includes(id) && selectedIds.length > 1) {
-                                    updateMultipleElements(selectedIds, updates);
-                                } else {
-                                    updateElement(id, updates);
-                                }
-                            }}
-                            onDelete={removeElement}
-                        >
-                            {el.type === 'phone' && (
-                                <div className="relative pointer-events-none flex items-center justify-center">
-                                    {isModern ? (
-                                        <ModernDevice model={model as (typeof modernModels)[number]} width={300}>
-                                            {screenContent}
-                                        </ModernDevice>
-                                    ) : (
-                                        <DeviceFrameset
-                                            device={(() => {
-                                                const m = el.props.model as any;
-                                                // Valid keys in react-device-frameset 1.3.4
-                                                const validKeys = [
-                                                    'iPhone X', 'iPhone 8', 'iPhone 8 Plus', 'iPhone 5s', 'iPhone 5c', 'iPhone 4s',
-                                                    'Galaxy Note 8', 'Nexus 5', 'Lumia 920', 'Samsung Galaxy S5', 'HTC One',
-                                                    'iPad Mini', 'MacBook Pro'
-                                                ];
+                        <div key={el.id}>
+                            <CanvasElement
+                                id={el.id}
+                                type={el.type}
+                                data={{ x: el.x, y: el.y, scale: el.scale, rotation: el.rotation || 0 }}
+                                isSelected={selectedIds.includes(el.id)}
+                                onSelect={toggleSelection}
+                                onDragSelected={moveElements}
+                                onUpdate={(id, updates) => {
+                                    if (selectedIds.includes(id) && selectedIds.length > 1) {
+                                        updateMultipleElements(selectedIds, updates);
+                                    } else {
+                                        updateElement(id, updates);
+                                    }
+                                }}
+                                onDelete={removeElement}
+                            >
+                                {el.type === 'phone' && (
+                                    <div className="relative pointer-events-none flex items-center justify-center">
+                                        {isModern ? (
+                                            <ModernDevice model={model as (typeof modernModels)[number]} width={300}>
+                                                {screenContent}
+                                            </ModernDevice>
+                                        ) : (
+                                            <DeviceFrameset
+                                                device={(() => {
+                                                    const m = el.props.model as any;
+                                                    // Valid keys in react-device-frameset 1.3.4
+                                                    const validKeys = [
+                                                        'iPhone X', 'iPhone 8', 'iPhone 8 Plus', 'iPhone 5s', 'iPhone 5c', 'iPhone 4s',
+                                                        'Galaxy Note 8', 'Nexus 5', 'Lumia 920', 'Samsung Galaxy S5', 'HTC One',
+                                                        'iPad Mini', 'MacBook Pro'
+                                                    ];
 
-                                                // Direct match
-                                                if (validKeys.includes(m)) return m;
+                                                    // Direct match
+                                                    if (validKeys.includes(m)) return m;
 
-                                                // Legacy/Fuzzy Mapping
-                                                if (m === 'Note 8') return 'Galaxy Note 8';
-                                                // Default
-                                                return 'iPhone X';
-                                            })()}
-                                            color="black"
-                                            width={300} // Increased base width for better initial visibility
-                                        >
-                                            {screenContent}
-                                        </DeviceFrameset>
-                                    )}
-                                </div>
-                            )}
-
-                            {el.type === 'bubble' && (
-                                <div
-                                    className={`flex items-center gap-3 p-4 backdrop-blur-xl rounded-2xl shadow-xl min-w-[200px] border border-white/10 ${el.props.variant === 'solid' ? 'shadow-black/20' : ''} ${el.props.variant === 'glass' ? 'backdrop-blur-2xl' : ''}`}
-                                    style={{
-                                        backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 1) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'solid' ? (el.props.color || 'white') : (el.props.color ? `${el.props.color}33` : 'rgba(255,255,255,0.1)')),
-                                        fontFamily,
-                                        color: el.props.textColor || (el.props.variant === 'solid' ? 'black' : 'white')
-                                    }}
-                                >
-                                    {(el.props.showIcon !== false) && (
-                                        <div className="size-10 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: el.props.iconColor ? `${el.props.iconColor}22` : 'rgba(255,255,255,0.1)', color: el.props.iconColor || el.props.color || '#0bc9da' }}>
-                                            <span className="material-symbols-outlined">{el.props.icon || 'notifications'}</span>
-                                        </div>
-                                    )}
-                                    <div className="flex-1">
-                                        <p
-                                            contentEditable
-                                            suppressContentEditableWarning
-                                            className="font-bold text-sm outline-none cursor-text select-text relative z-[50] pointer-events-auto min-w-[50px] mb-0.5"
-                                            style={{ color: el.props.textColor || (el.props.variant === 'solid' ? 'black' : 'white') }}
-                                            onPointerDown={(e) => {
-                                                if (!selectedIds.includes(el.id)) return;
-                                                e.stopPropagation();
-                                                const target = e.currentTarget;
-                                                setTimeout(() => target.focus(), 10);
-                                            }}
-                                            onFocus={(e) => {
-                                                const range = document.createRange();
-                                                const sel = window.getSelection();
-                                                range.selectNodeContents(e.currentTarget);
-                                                sel?.removeAllRanges();
-                                                sel?.addRange(range);
-                                            }}
-                                            onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
-                                        >
-                                            {el.props.text || 'New Alert'}
-                                        </p>
-                                        <p
-                                            contentEditable
-                                            suppressContentEditableWarning
-                                            className="text-[9px] font-black uppercase tracking-tighter opacity-40 outline-none cursor-text select-text pointer-events-auto"
-                                            onPointerDown={(e) => {
-                                                if (!selectedIds.includes(el.id)) return;
-                                                e.stopPropagation();
-                                                const target = e.currentTarget;
-                                                setTimeout(() => target.focus(), 10);
-                                            }}
-                                            onFocus={(e) => {
-                                                const range = document.createRange();
-                                                const sel = window.getSelection();
-                                                range.selectNodeContents(e.currentTarget);
-                                                sel?.removeAllRanges();
-                                                sel?.addRange(range);
-                                            }}
-                                            onBlur={(e) => updateElement(el.id, { props: { label: e.currentTarget.innerText } })}
-                                        >
-                                            {el.props.label || 'Touch to modify'}
-                                        </p>
+                                                    // Legacy/Fuzzy Mapping
+                                                    if (m === 'Note 8') return 'Galaxy Note 8';
+                                                    // Default
+                                                    return 'iPhone X';
+                                                })()}
+                                                color="black"
+                                                width={300} // Increased base width for better initial visibility
+                                            >
+                                                {screenContent}
+                                            </DeviceFrameset>
+                                        )}
                                     </div>
-                                </div>
-                            )}
+                                )}
 
-                            {el.type === 'message-stack' && (
-                                <div className="relative w-[240px] h-[80px]" onPointerDown={(e) => { if (selectedIds.includes(el.id)) e.stopPropagation(); }}>
-                                    <div className="absolute top-4 left-4 w-full h-full bg-white/5 rounded-2xl border border-white/5 translate-y-4"></div>
-                                    <div className="absolute top-2 left-2 w-full h-full bg-white/10 rounded-2xl border border-white/10 translate-y-2"></div>
+                                {el.type === 'bubble' && (
                                     <div
-                                        className="absolute inset-0 flex items-center gap-3 p-4 backdrop-blur-xl rounded-2xl shadow-xl border border-white/10"
+                                        className={`flex items-center gap-3 p-4 backdrop-blur-xl rounded-2xl shadow-xl min-w-[200px] border border-white/10 ${el.props.variant === 'solid' ? 'shadow-black/20' : ''} ${el.props.variant === 'glass' ? 'backdrop-blur-2xl' : ''}`}
                                         style={{
-                                            backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.2) * 255).toString(16).padStart(2, '0')) : 'rgba(255,255,255,0.1)',
-                                            color: el.props.textColor || 'white'
+                                            backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 1) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'solid' ? (el.props.color || 'white') : (el.props.color ? `${el.props.color}33` : 'rgba(255,255,255,0.1)')),
+                                            fontFamily,
+                                            color: el.props.textColor || (el.props.variant === 'solid' ? 'black' : 'white')
                                         }}
                                     >
-                                        <div className="size-10 rounded-full bg-primary/20 flex items-center justify-center pointer-events-none">
-                                            <span className="material-symbols-outlined text-primary">mail</span>
-                                        </div>
+                                        {(el.props.showIcon !== false) && (
+                                            <div className="size-10 rounded-full flex items-center justify-center shrink-0" style={{ backgroundColor: el.props.iconColor ? `${el.props.iconColor}22` : 'rgba(11, 201, 218, 0.1)', color: el.props.iconColor || el.props.color || '#0bc9da' }}>
+                                                <span className="material-symbols-outlined">{el.props.icon || 'notifications'}</span>
+                                            </div>
+                                        )}
                                         <div className="flex-1">
                                             <p
-                                                contentEditable suppressContentEditableWarning
-                                                className="font-bold text-sm outline-none select-text cursor-text pointer-events-auto"
+                                                contentEditable={!isExporting}
+                                                suppressContentEditableWarning
+                                                className="font-bold text-sm outline-none cursor-text select-text relative z-[50] pointer-events-auto min-w-[50px] mb-0.5"
+                                                style={{ color: el.props.textColor || (el.props.variant === 'solid' ? 'black' : 'white') }}
                                                 onPointerDown={(e) => {
                                                     if (!selectedIds.includes(el.id)) return;
                                                     e.stopPropagation();
@@ -720,208 +700,12 @@ const Studio = () => {
                                                 }}
                                                 onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                             >
-                                                {el.props.text || 'Notification Title'}
+                                                {el.props.text || 'New Alert'}
                                             </p>
-                                            <p className="text-[10px] opacity-50 pointer-events-none">2 minutes ago</p>
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
-
-                            {el.type === 'chart' && (
-                                <div
-                                    className="p-6 rounded-3xl border border-white/10 shadow-2xl backdrop-blur-xl min-w-[240px]"
-                                    style={{ backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : 'rgba(22,25,32,0.8)' }}
-                                >
-                                    <div className="flex items-end gap-2 h-24">
-                                        {[40, 70, 45, 90, 65, 80, 55].map((h, i) => (
-                                            <div
-                                                key={i}
-                                                className="flex-1 rounded-t-lg transition-all duration-500"
-                                                style={{ height: `${h}%`, backgroundColor: i === 3 ? (el.props.color || '#0bc9da') : 'rgba(255,255,255,0.1)' }}
-                                            ></div>
-                                        ))}
-                                    </div>
-                                    <div className="mt-4 flex justify-between items-center">
-                                        <span className="text-[10px] font-bold uppercase tracking-widest opacity-50">Weekly Analysis</span>
-                                        <span className="text-sm font-black text-primary">+24%</span>
-                                    </div>
-                                </div>
-                            )}
-
-                            {el.type === 'progress-circle' && (
-                                <div className="relative size-32 flex items-center justify-center">
-                                    <svg className="size-full transform -rotate-90">
-                                        <circle cx="64" cy="64" r="58" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-white/10" />
-                                        <circle
-                                            cx="64" cy="64" r="58" stroke="currentColor" strokeWidth="8" fill="transparent"
-                                            strokeDasharray={364} strokeDashoffset={364 * (1 - 0.85)}
-                                            className="text-primary transition-all duration-1000"
-                                            style={{ color: el.props.color || '#0bc9da' }}
-                                        />
-                                    </svg>
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                                        <span
-                                            contentEditable suppressContentEditableWarning
-                                            className="text-2xl font-black outline-none select-text cursor-text pointer-events-auto"
-                                            onPointerDown={(e) => {
-                                                if (!selectedIds.includes(el.id)) return;
-                                                e.stopPropagation();
-                                                const target = e.currentTarget;
-                                                setTimeout(() => target.focus(), 10);
-                                            }}
-                                            onFocus={(e) => {
-                                                const range = document.createRange();
-                                                const sel = window.getSelection();
-                                                range.selectNodeContents(e.currentTarget);
-                                                sel?.removeAllRanges();
-                                                sel?.addRange(range);
-                                            }}
-                                            onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
-                                        >
-                                            {el.props.text || '85%'}
-                                        </span>
-                                        <span className="text-[8px] font-bold uppercase opacity-50 max-w-[60px] leading-tight">{el.props.label || 'Goal'}</span>
-                                    </div>
-                                </div>
-                            )}
-
-                            {el.type === 'avatar-group' && (
-                                <div className="flex -space-x-4">
-                                    {[1, 2, 3, 4].map((i) => (
-                                        <div key={i} className="size-12 rounded-full border-4 border-[#0f0f0f] bg-surface-dark overflow-hidden flex items-center justify-center shadow-lg hover:z-10 transition-all cursor-pointer">
-                                            <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${i + (el.id)}`} alt="Avatar" className="w-full h-full object-cover" />
-                                        </div>
-                                    ))}
-                                    <div className="size-12 rounded-full border-4 border-[#0f0f0f] bg-primary flex items-center justify-center text-black font-black text-xs shadow-lg">+12</div>
-                                </div>
-                            )}
-
-                            {el.type === 'grid-menu' && (
-                                <div
-                                    className="p-4 rounded-3xl grid grid-cols-3 gap-4 border border-white/5 shadow-2xl backdrop-blur-xl"
-                                    style={{ backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : 'rgba(22,25,32,0.8)' }}
-                                >
-                                    {['Home', 'Profile', 'Wallet', 'Settings', 'Stats', 'Lock'].map((ico) => (
-                                        <div key={ico} className="flex flex-col items-center justify-center p-2 rounded-2xl bg-white/[0.03] hover:bg-primary transition-all group/it border border-white/5 aspect-square">
-                                            <span className="material-symbols-outlined !text-[20px] group-hover/it:text-black mb-1">
-                                                {ico === 'Stats' ? 'bar_chart' :
-                                                    ico === 'Profile' ? 'person' :
-                                                        ico === 'Wallet' ? 'account_balance_wallet' :
-                                                            ico === 'Lock' ? 'lock' :
-                                                                ico === 'Settings' ? 'settings' : 'home'}
-                                            </span>
-                                            <span className="block text-center leading-none tracking-tighter group-hover/it:text-black/80 font-black uppercase" style={{ fontSize: '6px' }}>{ico}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-
-                            {el.type === 'stat' && (
-                                <div
-                                    className={`
-                                 p-4 border shadow-lg min-w-[140px] text-center
-                                 ${el.props.variant === 'minimal' ? 'bg-transparent border-none' : 'rounded-xl backdrop-blur-lg'}
-                                 ${el.props.variant === 'pill' ? 'rounded-full px-6 flex items-center gap-3' : ''}
-                             `}
-                                    style={{
-                                        backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'minimal' ? 'transparent' : 'rgba(22, 25, 32, 0.8)'),
-                                        borderColor: el.props.variant === 'minimal' ? 'transparent' : (el.props.color || '#2d333d'),
-                                        fontFamily
-                                    }}
-                                >
-                                    {el.props.showIcon && (
-                                        <span className="material-symbols-outlined mb-1 block" style={{ color: el.props.iconColor || el.props.color }}>{el.props.icon || 'trending_up'}</span>
-                                    )}
-                                    <p className="text-xs font-bold uppercase tracking-wider opacity-50" style={{ color: el.props.textColor || 'white' }}>{el.props.label || 'Label'}</p>
-                                    <p
-                                        contentEditable
-                                        suppressContentEditableWarning
-                                        className="text-2xl font-black outline-none mt-1 select-text cursor-text pointer-events-auto relative z-10"
-                                        style={{ color: el.props.textColor || el.props.color || '#ffffff' }}
-                                        onPointerDown={(e) => {
-                                            if (!selectedIds.includes(el.id)) return;
-                                            e.stopPropagation();
-                                            const target = e.currentTarget;
-                                            setTimeout(() => target.focus(), 10);
-                                        }}
-                                        onFocus={(e) => {
-                                            const range = document.createRange();
-                                            const sel = window.getSelection();
-                                            range.selectNodeContents(e.currentTarget);
-                                            sel?.removeAllRanges();
-                                            sel?.addRange(range);
-                                        }}
-                                        onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
-                                    >
-                                        {el.props.text || '$42.5k'}
-                                    </p>
-                                </div>
-                            )}
-
-                            {el.type === 'text' && (
-                                <motion.div
-                                    animate={el.props.variant === 'animated' ? {
-                                        y: [0, -10, 0],
-                                        rotate: [0, 1, -1, 0]
-                                    } : {}}
-                                    transition={{ repeat: Infinity, duration: 4, ease: "easeInOut" }}
-                                    className={`
-                                        flex flex-col items-center justify-center transition-all duration-300
-                                        ${el.props.variant === 'glass' ? 'p-10 backdrop-blur-3xl bg-white/5 border border-white/10 rounded-[40px] shadow-[0_30px_70px_-15px_rgba(0,0,0,0.5)] relative overflow-hidden before:absolute before:inset-0 before:bg-gradient-to-br before:from-white/10 before:to-transparent' : ''}
-                                        ${el.props.variant === 'solid' || !el.props.variant || el.props.variant === 'default' ? 'p-10 bg-[#111317] border border-white/5 rounded-[40px] shadow-2xl overflow-hidden' : ''}
-                                        ${el.props.variant === '3d' ? 'p-10 bg-[#1a1c21] rounded-[40px] border-b-[12px] border-black/40 shadow-[0_30px_60px_-10px_rgba(0,0,0,0.7)] border-x-2 border-t-2 border-white/5' : ''}
-                                        ${el.props.variant === 'outline' ? 'p-10 border-2 border-current rounded-[40px] border-dashed opacity-80' : ''}
-                                        ${el.props.variant === 'neon' ? 'relative after:absolute after:inset-0 after:bg-primary/20 after:blur-[100px] after:-z-10' : ''}
-                                        ${el.props.variant === 'none' ? 'bg-transparent border-none p-0' : ''}
-                                    `}
-                                    style={{
-                                        backgroundColor: (el.props.variant === 'glass' || el.props.variant === 'solid' || el.props.variant === '3d' || !el.props.variant || el.props.variant === 'default') ? (el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'default' || !el.props.variant) ? 'rgba(255,255,255,0.05)' : undefined) : 'transparent',
-                                        minWidth: (el.props.variant === 'glass' || el.props.variant === 'solid' || el.props.variant === '3d' || !el.props.variant || el.props.variant === 'default') ? '280px' : 'none',
-                                        color: el.props.variant === 'outline' ? (el.props.textColor || el.props.color || '#ffffff') : undefined
-                                    }}
-                                >
-                                    <h2
-                                        contentEditable
-                                        suppressContentEditableWarning
-                                        className={`
-                                            font-black outline-none cursor-text select-text pointer-events-auto text-center relative z-10
-                                            ${el.props.variant === 'heading' ? 'text-7xl tracking-tighter leading-[0.9]' : ''}
-                                            ${el.props.variant === 'caption' ? 'text-xl font-medium tracking-[0.3em] uppercase opacity-70' : ''}
-                                            ${!el.props.variant || el.props.variant === 'default' ? 'text-5xl tracking-tight' : ''}
-                                            ${el.props.variant === 'neon' ? 'text-6xl drop-shadow-[0_0_25px_rgba(23,161,207,1)]' : ''}
-                                            ${el.props.variant === '3d' ? 'text-6xl drop-shadow-[0_4px_8px_rgba(0,0,0,0.8)]' : ''}
-                                        `}
-                                        style={{
-                                            color: el.props.textColor || el.props.color || '#ffffff',
-                                            fontFamily,
-                                            userSelect: 'text',
-                                            WebkitUserSelect: 'text'
-                                        }}
-                                        onPointerDown={(e) => {
-                                            if (!selectedIds.includes(el.id)) return;
-                                            e.stopPropagation();
-                                            const target = e.currentTarget;
-                                            setTimeout(() => target.focus(), 10);
-                                        }}
-                                        onFocus={(e) => {
-                                            const range = document.createRange();
-                                            const sel = window.getSelection();
-                                            range.selectNodeContents(e.currentTarget);
-                                            sel?.removeAllRanges();
-                                            sel?.addRange(range);
-                                        }}
-                                        onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
-                                    >
-                                        {el.props.text || 'Edit Me'}
-                                    </h2>
-                                    {(el.props.variant === 'glass' || el.props.variant === '3d' || el.props.variant === 'solid') && (
-                                        <div className="flex items-center gap-2 mt-6 opacity-30">
-                                            <div className="h-px w-8 bg-current"></div>
                                             <p
-                                                contentEditable
+                                                contentEditable={!isExporting}
                                                 suppressContentEditableWarning
-                                                className="text-[10px] font-black uppercase tracking-[0.2em] outline-none cursor-text select-text pointer-events-auto"
+                                                className="text-[9px] font-black uppercase tracking-tighter opacity-40 outline-none cursor-text select-text pointer-events-auto"
                                                 onPointerDown={(e) => {
                                                     if (!selectedIds.includes(el.id)) return;
                                                     e.stopPropagation();
@@ -937,69 +721,348 @@ const Studio = () => {
                                                 }}
                                                 onBlur={(e) => updateElement(el.id, { props: { label: e.currentTarget.innerText } })}
                                             >
-                                                {el.props.label || 'Design Studio'}
+                                                {el.props.label || 'Touch to modify'}
                                             </p>
-                                            <div className="h-px w-8 bg-current"></div>
                                         </div>
-                                    )}
-                                </motion.div>
-                            )}
+                                    </div>
+                                )}
 
-                            {el.type === 'sticker' && (
-                                <div
-                                    className={`
+                                {el.type === 'message-stack' && (
+                                    <div className="relative w-[240px] h-[80px]" onPointerDown={(e) => { if (selectedIds.includes(el.id)) e.stopPropagation(); }}>
+                                        <div className="absolute top-4 left-4 w-full h-full bg-white/5 rounded-2xl border border-white/5 translate-y-4"></div>
+                                        <div className="absolute top-2 left-2 w-full h-full bg-white/10 rounded-2xl border border-white/10 translate-y-2"></div>
+                                        <div
+                                            className="absolute inset-0 flex items-center gap-3 p-4 backdrop-blur-xl rounded-2xl shadow-xl border border-white/10"
+                                            style={{
+                                                backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.2) * 255).toString(16).padStart(2, '0')) : 'rgba(255,255,255,0.1)',
+                                                color: el.props.textColor || 'white'
+                                            }}
+                                        >
+                                            <div className="size-10 rounded-full flex items-center justify-center pointer-events-none" style={{ backgroundColor: 'rgba(11, 201, 218, 0.2)' }}>
+                                                <span className="material-symbols-outlined" style={{ color: '#0bc9da' }}>mail</span>
+                                            </div>
+                                            <div className="flex-1">
+                                                <p
+                                                    contentEditable={!isExporting} suppressContentEditableWarning
+                                                    className="font-bold text-sm outline-none select-text cursor-text pointer-events-auto"
+                                                    onPointerDown={(e) => {
+                                                        if (!selectedIds.includes(el.id)) return;
+                                                        e.stopPropagation();
+                                                        const target = e.currentTarget;
+                                                        setTimeout(() => target.focus(), 10);
+                                                    }}
+                                                    onFocus={(e) => {
+                                                        const range = document.createRange();
+                                                        const sel = window.getSelection();
+                                                        range.selectNodeContents(e.currentTarget);
+                                                        sel?.removeAllRanges();
+                                                        sel?.addRange(range);
+                                                    }}
+                                                    onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
+                                                >
+                                                    {el.props.text || 'Notification Title'}
+                                                </p>
+                                                <p className="text-[10px] opacity-50 pointer-events-none">2 minutes ago</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {el.type === 'chart' && (
+                                    <div
+                                        className="p-6 rounded-3xl border border-white/10 shadow-2xl backdrop-blur-xl min-w-[240px]"
+                                        style={{ backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : 'rgba(22,25,32,0.8)' }}
+                                    >
+                                        <div className="flex items-end gap-2 h-24">
+                                            {[40, 70, 45, 90, 65, 80, 55].map((h, i) => (
+                                                <div
+                                                    key={i}
+                                                    className="flex-1 rounded-t-lg transition-all duration-500"
+                                                    style={{ height: `${h}%`, backgroundColor: i === 3 ? (el.props.color || '#0bc9da') : 'rgba(255,255,255,0.1)' }}
+                                                ></div>
+                                            ))}
+                                        </div>
+                                        <div className="mt-4 flex justify-between items-center">
+                                            <span className="text-[10px] font-bold uppercase tracking-widest opacity-50">Weekly Analysis</span>
+                                            <span className="text-sm font-black" style={{ color: '#0bc9da' }}>+24%</span>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {el.type === 'progress-circle' && (
+                                    <div className="relative size-32 flex items-center justify-center">
+                                        <svg className="size-full transform -rotate-90">
+                                            <circle cx="64" cy="64" r="58" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-white/10" />
+                                            <circle
+                                                cx="64" cy="64" r="58" stroke="currentColor" strokeWidth="8" fill="transparent"
+                                                strokeDasharray={364} strokeDashoffset={364 * (1 - 0.85)}
+                                                className="transition-all duration-1000"
+                                                style={{ color: el.props.color || '#0bc9da', stroke: el.props.color || '#0bc9da' }}
+                                            />
+                                        </svg>
+                                        <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                                            <span
+                                                contentEditable={!isExporting} suppressContentEditableWarning
+                                                className="text-2xl font-black outline-none select-text cursor-text pointer-events-auto"
+                                                onPointerDown={(e) => {
+                                                    if (!selectedIds.includes(el.id)) return;
+                                                    e.stopPropagation();
+                                                    const target = e.currentTarget;
+                                                    setTimeout(() => target.focus(), 10);
+                                                }}
+                                                onFocus={(e) => {
+                                                    const range = document.createRange();
+                                                    const sel = window.getSelection();
+                                                    range.selectNodeContents(e.currentTarget);
+                                                    sel?.removeAllRanges();
+                                                    sel?.addRange(range);
+                                                }}
+                                                onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
+                                            >
+                                                {el.props.text || '85%'}
+                                            </span>
+                                            <span className="text-[8px] font-bold uppercase opacity-50 max-w-[60px] leading-tight">{el.props.label || 'Goal'}</span>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {el.type === 'avatar-group' && (
+                                    <div className="flex -space-x-4">
+                                        {[1, 2, 3, 4].map((i) => (
+                                            <div key={i} className="size-12 rounded-full border-4 border-[#0f0f0f] bg-surface-dark overflow-hidden flex items-center justify-center shadow-lg hover:z-10 transition-all cursor-pointer">
+                                                <img
+                                                    src={`https://images.weserv.nl/?url=${encodeURIComponent(`https://api.dicebear.com/7.x/avataaars/svg?seed=${i + (el.id)}`)}`}
+                                                    alt="Avatar"
+                                                    className="w-full h-full object-cover"
+                                                    crossOrigin="anonymous"
+                                                />
+                                            </div>
+                                        ))}
+                                        <div className="size-12 rounded-full border-4 border-[#0f0f0f] flex items-center justify-center text-black font-black text-xs shadow-lg" style={{ backgroundColor: '#0bc9da' }}>+12</div>
+                                    </div>
+                                )}
+
+                                {el.type === 'grid-menu' && (
+                                    <div
+                                        className="p-4 rounded-3xl grid grid-cols-3 gap-4 border border-white/5 shadow-2xl backdrop-blur-xl"
+                                        style={{ backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : 'rgba(22,25,32,0.8)' }}
+                                    >
+                                        {['Home', 'Profile', 'Wallet', 'Settings', 'Stats', 'Lock'].map((ico) => (
+                                            <div key={ico} className="flex flex-col items-center justify-center p-2 rounded-2xl bg-white/[0.03] hover:bg-primary transition-all group/it border border-white/5 aspect-square">
+                                                <span className="material-symbols-outlined !text-[20px] group-hover/it:text-black mb-1">
+                                                    {ico === 'Stats' ? 'bar_chart' :
+                                                        ico === 'Profile' ? 'person' :
+                                                            ico === 'Wallet' ? 'account_balance_wallet' :
+                                                                ico === 'Lock' ? 'lock' :
+                                                                    ico === 'Settings' ? 'settings' : 'home'}
+                                                </span>
+                                                <span className="block text-center leading-none tracking-tighter group-hover/it:text-black/80 font-black uppercase" style={{ fontSize: '6px' }}>{ico}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {el.type === 'stat' && (
+                                    <div
+                                        className={`
+                                 p-4 border shadow-lg min-w-[140px] text-center
+                                 ${el.props.variant === 'minimal' ? 'bg-transparent border-none' : 'rounded-xl backdrop-blur-lg'}
+                                 ${el.props.variant === 'pill' ? 'rounded-full px-6 flex items-center gap-3' : ''}
+                             `}
+                                        style={{
+                                            backgroundColor: el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'minimal' ? 'transparent' : 'rgba(22, 25, 32, 0.8)'),
+                                            borderColor: el.props.variant === 'minimal' ? 'transparent' : (el.props.color || '#2d333d'),
+                                            fontFamily
+                                        }}
+                                    >
+                                        {el.props.showIcon && (
+                                            <span className="material-symbols-outlined mb-1 block" style={{ color: el.props.iconColor || el.props.color }}>{el.props.icon || 'trending_up'}</span>
+                                        )}
+                                        <p className="text-xs font-bold uppercase tracking-wider opacity-50" style={{ color: el.props.textColor || 'white' }}>{el.props.label || 'Label'}</p>
+                                        <p
+                                            contentEditable={!isExporting}
+                                            suppressContentEditableWarning
+                                            className="text-2xl font-black outline-none mt-1 select-text cursor-text pointer-events-auto relative z-10"
+                                            style={{ color: el.props.textColor || el.props.color || '#ffffff' }}
+                                            onPointerDown={(e) => {
+                                                if (!selectedIds.includes(el.id)) return;
+                                                e.stopPropagation();
+                                                const target = e.currentTarget;
+                                                setTimeout(() => target.focus(), 10);
+                                            }}
+                                            onFocus={(e) => {
+                                                const range = document.createRange();
+                                                const sel = window.getSelection();
+                                                range.selectNodeContents(e.currentTarget);
+                                                sel?.removeAllRanges();
+                                                sel?.addRange(range);
+                                            }}
+                                            onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
+                                        >
+                                            {el.props.text || '$42.5k'}
+                                        </p>
+                                    </div>
+                                )}
+
+                                {el.type === 'text' && (
+                                    <div
+                                        className={`
+                                        flex flex-col items-center justify-center transition-all duration-300
+                                        ${el.props.variant === 'glass' ? 'p-10 backdrop-blur-xl bg-white/10 border border-white/20 rounded-[40px] shadow-[0_30px_70px_-15px_rgba(0,0,0,0.5)] relative overflow-hidden before:absolute before:inset-0 before:bg-gradient-to-br before:from-white/10 before:to-transparent' : ''}
+                                        ${el.props.variant === 'solid' || !el.props.variant || el.props.variant === 'default' ? 'p-10 bg-[#111317] border border-white/5 rounded-[40px] shadow-2xl overflow-hidden' : ''}
+                                        ${el.props.variant === '3d' ? 'p-10 bg-[#1a1c21] rounded-[40px] border-b-[12px] border-black/40 shadow-[0_30px_60px_-10px_rgba(0,0,0,0.7)] border-x-2 border-t-2 border-white/5' : ''}
+                                        ${el.props.variant === 'outline' ? 'p-10 border-2 border-current rounded-[40px] border-dashed opacity-80' : ''}
+                                        ${el.props.variant === 'neon' ? 'relative' : ''}
+                                        ${el.props.variant === 'none' ? 'bg-transparent border-none p-0' : ''}
+                                    `}
+                                        style={{
+                                            animation: (el.props.variant === 'animated') ? 'float 4s ease-in-out infinite' : 'none',
+                                            backgroundColor: (el.props.variant === 'glass' || el.props.variant === 'solid' || el.props.variant === '3d' || !el.props.variant || el.props.variant === 'default') ? (el.props.bgColor ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.8) * 255).toString(16).padStart(2, '0')) : (el.props.variant === 'default' || !el.props.variant) ? 'rgba(255,255,255,0.05)' : undefined) : 'transparent',
+                                            minWidth: (el.props.variant === 'glass' || el.props.variant === 'solid' || el.props.variant === '3d' || !el.props.variant || el.props.variant === 'default') ? '280px' : 'none',
+                                            color: el.props.variant === 'outline' ? (el.props.textColor || el.props.color || '#ffffff') : undefined
+                                        }}
+                                    >
+                                        <h2
+                                            contentEditable={!isExporting}
+                                            suppressContentEditableWarning
+                                            className={`
+                                            font-black outline-none cursor-text select-text pointer-events-auto text-center relative z-10
+                                            ${el.props.variant === 'heading' ? 'text-7xl tracking-tighter leading-[0.9]' : ''}
+                                            ${el.props.variant === 'caption' ? 'text-xl font-medium tracking-[0.3em] uppercase opacity-70' : ''}
+                                            ${!el.props.variant || el.props.variant === 'default' ? 'text-5xl tracking-tight' : ''}
+                                            ${el.props.variant === 'neon' ? 'text-6xl' : ''}
+                                            ${el.props.variant === '3d' ? 'text-6xl drop-shadow-[0_4px_8px_rgba(0,0,0,0.8)]' : ''}
+                                        `}
+                                            style={{
+                                                color: el.props.textColor || el.props.color || '#ffffff',
+                                                fontFamily,
+                                                userSelect: 'text',
+                                                WebkitUserSelect: 'text'
+                                            }}
+                                            onPointerDown={(e) => {
+                                                if (!selectedIds.includes(el.id)) return;
+                                                e.stopPropagation();
+                                                const target = e.currentTarget;
+                                                setTimeout(() => target.focus(), 10);
+                                            }}
+                                            onFocus={(e) => {
+                                                const range = document.createRange();
+                                                const sel = window.getSelection();
+                                                range.selectNodeContents(e.currentTarget);
+                                                sel?.removeAllRanges();
+                                                sel?.addRange(range);
+                                            }}
+                                            onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
+                                        >
+                                            {el.props.text || 'Edit Me'}
+                                        </h2>
+                                        {(el.props.variant === 'glass' || el.props.variant === '3d' || el.props.variant === 'solid') && (
+                                            <div className="flex items-center gap-2 mt-6 opacity-30">
+                                                <div className="h-px w-8 bg-current"></div>
+                                                <p
+                                                    contentEditable={!isExporting}
+                                                    suppressContentEditableWarning
+                                                    className="text-[10px] font-black uppercase tracking-[0.2em] outline-none cursor-text select-text pointer-events-auto"
+                                                    onPointerDown={(e) => {
+                                                        if (!selectedIds.includes(el.id)) return;
+                                                        e.stopPropagation();
+                                                        const target = e.currentTarget;
+                                                        setTimeout(() => target.focus(), 10);
+                                                    }}
+                                                    onFocus={(e) => {
+                                                        const range = document.createRange();
+                                                        const sel = window.getSelection();
+                                                        range.selectNodeContents(e.currentTarget);
+                                                        sel?.removeAllRanges();
+                                                        sel?.addRange(range);
+                                                    }}
+                                                    onBlur={(e) => updateElement(el.id, { props: { label: e.currentTarget.innerText } })}
+                                                >
+                                                    {el.props.label || 'Design Studio'}
+                                                </p>
+                                                <div className="h-px w-8 bg-current"></div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {el.type === 'sticker' && (
+                                    <div
+                                        className={`
                                  px-4 py-2 text-black font-black uppercase tracking-widest text-xs shadow-lg transform -rotate-6
                                  ${el.props.variant === 'tape' ? 'opacity-90 shadow-sm' : 'rounded-full border-2 border-white/20'}
                                  ${el.props.variant === 'stamp' ? 'rounded-full border-4 border-dashed bg-transparent !text-current !shadow-none' : ''}
                              `}
-                                    style={{
-                                        backgroundColor: el.props.variant === 'stamp' ? 'transparent' : (el.props.bgColor || el.props.color || '#0bc9da'),
-                                        color: el.props.textColor || (el.props.variant === 'stamp' ? (el.props.color || '#0bc9da') : 'black'),
-                                        borderColor: el.props.variant === 'stamp' ? (el.props.color || '#0bc9da') : undefined,
-                                        maskImage: el.props.variant === 'tape' ? 'url(https://s3-us-west-2.amazonaws.com/s.cdpn.io/8399/tape-mask.png)' : undefined,
-                                        fontFamily
-                                    }}
-                                >
-                                    {el.props.showIcon && (
-                                        <span className="material-symbols-outlined mr-1 align-middle" style={{ color: el.props.iconColor || 'inherit' }}>{el.props.icon || 'star'}</span>
-                                    )}
-                                    <span
-                                        contentEditable
-                                        suppressContentEditableWarning
-                                        className="outline-none cursor-text select-text pointer-events-auto"
-                                        onPointerDown={(e) => {
-                                            if (!selectedIds.includes(el.id)) return;
-                                            e.stopPropagation();
-                                            const target = e.currentTarget;
-                                            setTimeout(() => target.focus(), 10);
+                                        style={{
+                                            backgroundColor: el.props.variant === 'stamp' ? 'transparent' : (el.props.bgColor || el.props.color || '#0bc9da'),
+                                            color: el.props.textColor || (el.props.variant === 'stamp' ? (el.props.color || '#0bc9da') : 'black'),
+                                            transform: 'rotate(-6deg)',
+                                            borderColor: el.props.variant === 'stamp' ? (el.props.color || '#0bc9da') : undefined,
+                                            maskImage: el.props.variant === 'tape' ? 'url(https://s3-us-west-2.amazonaws.com/s.cdpn.io/8399/tape-mask.png)' : undefined,
+                                            fontFamily
                                         }}
-                                        onFocus={(e) => {
-                                            const range = document.createRange();
-                                            const sel = window.getSelection();
-                                            range.selectNodeContents(e.currentTarget);
-                                            sel?.removeAllRanges();
-                                            sel?.addRange(range);
-                                        }}
-                                        onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
                                     >
-                                        {el.props.text || 'NEW'}
-                                    </span>
-                                </div>
-                            )}
+                                        {el.props.showIcon && (
+                                            <span className="material-symbols-outlined mr-1 align-middle" style={{ color: el.props.iconColor || 'inherit' }}>{el.props.icon || 'star'}</span>
+                                        )}
+                                        <span
+                                            contentEditable
+                                            suppressContentEditableWarning
+                                            className="outline-none cursor-text select-text pointer-events-auto"
+                                            onPointerDown={(e) => {
+                                                if (!selectedIds.includes(el.id)) return;
+                                                e.stopPropagation();
+                                                const target = e.currentTarget;
+                                                setTimeout(() => target.focus(), 10);
+                                            }}
+                                            onFocus={(e) => {
+                                                const range = document.createRange();
+                                                const sel = window.getSelection();
+                                                range.selectNodeContents(e.currentTarget);
+                                                sel?.removeAllRanges();
+                                                sel?.addRange(range);
+                                            }}
+                                            onBlur={(e) => updateElement(el.id, { props: { text: e.currentTarget.innerText } })}
+                                        >
+                                            {el.props.text || 'NEW'}
+                                        </span>
+                                    </div>
+                                )}
 
-                            {el.type === 'icon' && (
-                                <div className="flex items-center justify-center size-20 drop-shadow-lg" style={{ color: el.props.iconColor || el.props.color || 'white' }}>
-                                    <span className="material-symbols-outlined text-[80px]">{el.props.text || 'star'}</span>
-                                </div>
-                            )}
+                                {el.type === 'icon' && (
+                                    <div className="flex items-center justify-center size-20 drop-shadow-lg" style={{ color: el.props.iconColor || el.props.color || 'white' }}>
+                                        <span className="material-symbols-outlined text-[80px]">{el.props.text || 'star'}</span>
+                                    </div>
+                                )}
 
-                            {el.type === 'graphics' && (
-                                <div
-                                    className="size-32 bg-gradient-to-br from-primary/20 to-purple-500/20 rounded-full blur-xl border border-white/10"
-                                    style={{ backgroundColor: el.props.color ? `${el.props.color}33` : undefined }}
-                                ></div>
-                            )}
-                        </CanvasElement>
+                                {el.type === 'graphics' && (
+                                    <div
+                                        className="w-full h-full bg-gradient-to-br from-primary/20 to-purple-500/20 rounded-full blur-xl border border-white/10"
+                                        style={{
+                                            backgroundColor: el.props.bgColor || el.props.color ? `${el.props.bgColor || el.props.color}33` : undefined
+                                        }}
+                                    ></div>
+                                )}
+
+                                {el.type === 'shape' && (
+                                    <div
+                                        className={`
+                                        w-full h-full border-2
+                                        ${el.props.variant === 'circle' ? 'rounded-full' : ''}
+                                        ${el.props.variant === 'pill' ? 'rounded-full' : ''}
+                                        ${el.props.variant === 'square' ? 'rounded-xl' : ''}
+                                        ${el.props.variant === 'triangle' ? 'clip-triangle' : ''}
+                                     `}
+                                        style={{
+                                            backgroundColor: el.props.bgColor || el.props.color || '#3b82f6',
+                                            borderColor: el.props.borderColor || 'transparent',
+                                            opacity: el.props.bgOpacity ?? 1
+                                        }}
+                                    />
+                                )}
+
+                            </CanvasElement>
+                        </div>
                     );
                 })}
             </>
@@ -1032,13 +1095,18 @@ const Studio = () => {
                         </button>
                         <button onClick={() => addElement('graphics')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group">
                             <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">blur_on</span>
-                            <span className="text-[10px] font-bold text-slate-300">Shape</span>
+                            <span className="text-[10px] font-bold text-slate-300">Glass Blob</span>
+                        </button>
+                        <button onClick={() => addElement('shape')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group">
+                            <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">category</span>
+                            <span className="text-[10px] font-bold text-slate-300">Vector Shape</span>
                         </button>
                         <button onClick={() => addElement('text')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group col-span-2">
                             <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">title</span>
                             <span className="text-[10px] font-bold text-slate-300">Text Block</span>
                         </button>
                     </div>
+
 
                     <div className="mt-8">
                         <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#9db2b8] mb-4">Smart Presets</h4>
@@ -1066,101 +1134,205 @@ const Studio = () => {
                         </div>
                     </div>
 
-                    <div className="mt-8 pt-6 border-t border-border-dark">
-                        <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#9db2b8] mb-4">Canvas Background</h4>
+                    <div className="mt-8 pt-6 border-t border-border-dark space-y-8">
+                        {/* 1. Base Layer (Solid / Image) */}
                         <div className="space-y-4">
+                            <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#9db2b8] flex items-center gap-2">
+                                <span className="material-symbols-outlined text-[14px]">wallpaper</span>
+                                Base Canvas Layer
+                            </h4>
                             <div className="flex bg-surface-dark rounded-lg p-1 border border-border-dark">
-                                {(['solid', 'gradient', 'grid', 'pattern'] as const).map(t => (
+                                {(['solid', 'image', 'mesh'] as const).map(t => (
                                     <button
                                         key={t}
-                                        onClick={() => setBackgroundConfig(prev => ({ ...prev, type: t, value: t === 'pattern' ? 'Waves' : prev.value }))}
-                                        className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded transition-all ${backgroundConfig.type === t ? 'bg-primary text-black shadow' : 'text-slate-500 hover:text-white'}`}
+                                        onClick={() => setCanvasBackground(prev => ({
+                                            ...prev,
+                                            type: t,
+                                            value: t === 'mesh' && !prev.value.startsWith('[') ? JSON.stringify([
+                                                { id: '1', x: 20, y: 20, color: '#3b82f6', scale: 400, blur: 100 },
+                                                { id: '2', x: 80, y: 80, color: '#a855f7', scale: 400, blur: 100 }
+                                            ]) : prev.value
+                                        }))}
+                                        className={`flex-1 py-1.5 text-[9px] font-bold uppercase rounded transition-all ${canvasBackground.type === t ? 'bg-primary text-black shadow' : 'text-slate-500 hover:text-white'}`}
                                     >
                                         {t}
                                     </button>
                                 ))}
                             </div>
 
-                            {backgroundConfig.type === 'solid' && (
-                                <div className="space-y-2">
-                                    <div className="flex justify-between items-center text-[10px] font-bold text-[#9db2b8] uppercase">
-                                        <label>Color</label>
-                                        <span className="font-mono text-slate-500">{backgroundConfig.value}</span>
+                            {canvasBackground.type === 'mesh' && (
+                                <div className="space-y-4">
+                                    <div className="flex justify-between items-center">
+                                        <label className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Mesh Points</label>
+                                        <button
+                                            onClick={() => {
+                                                const points = JSON.parse(canvasBackground.value);
+                                                points.push({ id: Math.random().toString(), x: 50, y: 50, color: '#ffffff', scale: 300, blur: 80 });
+                                                setCanvasBackground({ ...canvasBackground, value: JSON.stringify(points) });
+                                            }}
+                                            className="text-[9px] font-bold text-primary hover:underline"
+                                        >
+                                            + Add Point
+                                        </button>
                                     </div>
-                                    <div className="flex items-center gap-2">
-                                        <input type="color" value={backgroundConfig.value} onChange={(e) => setBackgroundConfig({ ...backgroundConfig, value: e.target.value })} className="size-10 rounded-lg bg-transparent cursor-pointer border border-border-dark" />
-                                        <input type="text" value={backgroundConfig.value} onChange={(e) => setBackgroundConfig({ ...backgroundConfig, value: e.target.value })} className="flex-1 h-10 px-3 bg-surface-dark border border-border-dark rounded-lg text-xs font-mono uppercase text-white focus:outline-none focus:border-primary" />
-                                    </div>
-                                </div>
-                            )}
-
-                            {backgroundConfig.type === 'gradient' && (
-                                <div className="space-y-2">
-                                    <div className="flex justify-between items-center text-[10px] font-bold text-[#9db2b8] uppercase">
-                                        <label>Gradient Colors</label>
-                                    </div>
-                                    <div className="flex gap-2">
-                                        <input type="color" value={backgroundConfig.value.split(',')[0] || '#000000'} onChange={(e) => {
-                                            const colors = backgroundConfig.value.split(',');
-                                            colors[0] = e.target.value;
-                                            setBackgroundConfig({ ...backgroundConfig, value: colors.join(',') });
-                                        }} className="size-10 rounded-lg bg-transparent cursor-pointer border border-border-dark" />
-                                        <input type="color" value={backgroundConfig.value.split(',')[1] || '#1a1a1a'} onChange={(e) => {
-                                            const colors = backgroundConfig.value.split(',');
-                                            colors[1] = e.target.value || '#1a1a1a';
-                                            setBackgroundConfig({ ...backgroundConfig, value: colors.join(',') });
-                                        }} className="size-10 rounded-lg bg-transparent cursor-pointer border border-border-dark" />
-                                    </div>
-                                    <p className="text-[10px] text-slate-500">Pick start and end colors</p>
-                                </div>
-                            )}
-
-                            {backgroundConfig.type === 'grid' && (
-                                <div className="space-y-3">
-                                    <div className="space-y-2">
-                                        <label className="text-[10px] font-bold text-[#9db2b8] uppercase">Grid Color</label>
-                                        <div className="flex items-center gap-2">
-                                            <input type="color" value={backgroundConfig.value} onChange={(e) => setBackgroundConfig({ ...backgroundConfig, value: e.target.value })} className="size-8 rounded bg-transparent cursor-pointer border border-border-dark" />
-                                            <input type="text" value={backgroundConfig.value} onChange={(e) => setBackgroundConfig({ ...backgroundConfig, value: e.target.value })} className="flex-1 h-8 px-2 bg-surface-dark border border-border-dark rounded text-xs font-mono uppercase text-white" />
-                                        </div>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <div className="flex justify-between items-center text-[10px] font-bold text-[#9db2b8] uppercase">
-                                            <label>Opacity</label>
-                                            <span className="font-mono text-primary bg-primary/10 px-1 rounded">{((backgroundConfig.opacity || 0.1) * 100).toFixed(0)}%</span>
-                                        </div>
-                                        <input
-                                            type="range" min="0.01" max="0.5" step="0.01" value={backgroundConfig.opacity || 0.1}
-                                            onChange={(e) => setBackgroundConfig({ ...backgroundConfig, opacity: parseFloat(e.target.value) })}
-                                            className="w-full accent-primary bg-surface-dark h-2 rounded-full appearance-none cursor-pointer"
-                                        />
-                                    </div>
-                                </div>
-                            )}
-
-                            {backgroundConfig.type === 'pattern' && (
-                                <div className="space-y-3">
-                                    <label className="text-[10px] font-bold text-[#9db2b8] uppercase">Pattern Theme</label>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        {['Waves', 'ZigZag', 'Dots', 'Carbon'].map(p => (
-                                            <button
-                                                key={p}
-                                                onClick={() => setBackgroundConfig({ ...backgroundConfig, value: p })}
-                                                className={`px-3 py-2 rounded text-[10px] font-bold border transition-all ${backgroundConfig.value === p ? 'border-primary bg-primary/10 text-primary' : 'border-border-dark text-slate-500 hover:border-white/20'}`}
-                                            >
-                                                {p}
-                                            </button>
+                                    <div className="space-y-3 max-h-60 overflow-y-auto pr-1 code-scrollbar">
+                                        {(JSON.parse(canvasBackground.value) as BackgroundPoint[]).map((p, idx) => (
+                                            <div key={p.id} className="p-3 bg-black/40 rounded-xl border border-white/5 space-y-3">
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="color" value={p.color}
+                                                        onChange={(e) => {
+                                                            const points = JSON.parse(canvasBackground.value);
+                                                            points[idx].color = e.target.value;
+                                                            setCanvasBackground({ ...canvasBackground, value: JSON.stringify(points) });
+                                                        }}
+                                                        className="size-6 rounded cursor-pointer border-none bg-transparent"
+                                                    />
+                                                    <span className="text-[9px] font-mono text-slate-400 flex-1">Point {idx + 1}</span>
+                                                    <button
+                                                        onClick={() => {
+                                                            const points = JSON.parse(canvasBackground.value);
+                                                            points.splice(idx, 1);
+                                                            setCanvasBackground({ ...canvasBackground, value: JSON.stringify(points) });
+                                                        }}
+                                                        className="material-symbols-outlined text-sm text-red-400 hover:text-red-300"
+                                                    >
+                                                        delete
+                                                    </button>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div className="space-y-1">
+                                                        <label className="text-[8px] text-slate-500 uppercase">X: {Math.round(p.x)}%</label>
+                                                        <input type="range" min="0" max="100" value={p.x} onChange={(e) => {
+                                                            const points = JSON.parse(canvasBackground.value);
+                                                            points[idx].x = parseFloat(e.target.value);
+                                                            setCanvasBackground({ ...canvasBackground, value: JSON.stringify(points) });
+                                                        }} className="w-full h-1 accent-primary bg-white/5 appearance-none rounded-full" />
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[8px] text-slate-500 uppercase">Y: {Math.round(p.y)}%</label>
+                                                        <input type="range" min="0" max="100" value={p.y} onChange={(e) => {
+                                                            const points = JSON.parse(canvasBackground.value);
+                                                            points[idx].y = parseFloat(e.target.value);
+                                                            setCanvasBackground({ ...canvasBackground, value: JSON.stringify(points) });
+                                                        }} className="w-full h-1 accent-primary bg-white/5 appearance-none rounded-full" />
+                                                    </div>
+                                                </div>
+                                            </div>
                                         ))}
                                     </div>
-                                    <div className="space-y-1 mt-2">
-                                        <div className="flex justify-between">
-                                            <label className="text-[9px] font-bold text-slate-500 uppercase">Pattern Opacity</label>
-                                            <span className="text-[9px] font-mono text-primary">{Math.round((backgroundConfig.opacity || 0.1) * 100)}%</span>
+                                </div>
+                            )}
+
+                            {canvasBackground.type === 'image' && (
+                                <div className="space-y-3">
+                                    <input
+                                        type="file"
+                                        ref={bgImageInputRef}
+                                        className="hidden"
+                                        accept="image/*"
+                                        onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file) {
+                                                const reader = new FileReader();
+                                                reader.onload = (re) => {
+                                                    setCanvasBackground({ ...canvasBackground, value: re.target?.result as string });
+                                                };
+                                                reader.readAsDataURL(file);
+                                            }
+                                        }}
+                                    />
+                                    <button
+                                        onClick={() => bgImageInputRef.current?.click()}
+                                        className="w-full h-24 border-2 border-dashed border-border-dark rounded-xl flex flex-col items-center justify-center gap-2 hover:border-primary/50 transition-all bg-black/20 overflow-hidden"
+                                    >
+                                        {canvasBackground.value.startsWith('data') ? (
+                                            <img src={canvasBackground.value} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <>
+                                                <span className="material-symbols-outlined text-slate-500">add_photo_alternate</span>
+                                                <span className="text-[9px] font-bold text-slate-500 uppercase">Select Base Image</span>
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            )}
+
+                            {canvasBackground.type === 'solid' && (
+                                <div className="flex items-center gap-3">
+                                    <input
+                                        type="color"
+                                        value={canvasBackground.value}
+                                        onChange={(e) => setCanvasBackground({ ...canvasBackground, value: e.target.value })}
+                                        className="size-10 rounded-lg bg-transparent cursor-pointer border border-border-dark"
+                                    />
+                                    <input
+                                        type="text"
+                                        value={canvasBackground.value}
+                                        onChange={(e) => setCanvasBackground({ ...canvasBackground, value: e.target.value })}
+                                        className="flex-1 h-10 px-3 bg-surface-dark border border-border-dark rounded-lg text-xs font-mono uppercase text-white focus:outline-none focus:border-primary"
+                                    />
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 2. Overlay Patterns */}
+                        <div className="space-y-4 pt-4 border-t border-white/5">
+                            <h4 className="text-[10px] font-bold uppercase tracking-widest text-[#9db2b8] flex items-center gap-2">
+                                <span className="material-symbols-outlined text-[14px]">texture</span>
+                                Patterns & Overlays
+                            </h4>
+                            <div className="flex bg-surface-dark rounded-lg p-1 border border-border-dark overflow-x-auto no-scrollbar">
+                                {(['none', 'grid', 'dots', 'pattern', 'gradient'] as const).map(t => (
+                                    <button
+                                        key={t}
+                                        onClick={() => setCanvasOverlay(prev => ({
+                                            ...prev,
+                                            type: t,
+                                            value: t === 'pattern' ? 'Waves' : (t === 'gradient' ? '#00000033,#00000000' : prev.value)
+                                        }))}
+                                        className={`flex-1 px-2 py-1.5 text-[9px] font-bold uppercase rounded transition-all whitespace-nowrap ${canvasOverlay.type === t ? 'bg-primary text-black shadow' : 'text-slate-500 hover:text-white'}`}
+                                    >
+                                        {t}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {canvasOverlay.type !== 'none' && (
+                                <div className="space-y-4">
+                                    {canvasOverlay.type === 'gradient' ? (
+                                        <div className="flex gap-2">
+                                            <input type="color" value={canvasOverlay.value.split(',')[0]} onChange={(e) => setCanvasOverlay({ ...canvasOverlay, value: `${e.target.value},${canvasOverlay.value.split(',')[1]}` })} className="size-8 rounded bg-transparent border border-border-dark" />
+                                            <input type="color" value={canvasOverlay.value.split(',')[1]} onChange={(e) => setCanvasOverlay({ ...canvasOverlay, value: `${canvasOverlay.value.split(',')[0]},${e.target.value}` })} className="size-8 rounded bg-transparent border border-border-dark" />
+                                        </div>
+                                    ) : canvasOverlay.type === 'pattern' ? (
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {['Waves', 'ZigZag', 'Dots', 'Carbon'].map(p => (
+                                                <button
+                                                    key={p}
+                                                    onClick={() => setCanvasOverlay({ ...canvasOverlay, value: p })}
+                                                    className={`px-2 py-1.5 rounded text-[9px] font-bold border transition-all ${canvasOverlay.value === p ? 'border-primary bg-primary/10 text-primary' : 'border-border-dark text-slate-500'}`}
+                                                >
+                                                    {p}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="flex items-center gap-2">
+                                            <input type="color" value={canvasOverlay.value} onChange={(e) => setCanvasOverlay({ ...canvasOverlay, value: e.target.value })} className="size-8 rounded bg-transparent border border-border-dark" />
+                                            <input type="text" value={canvasOverlay.value} onChange={(e) => setCanvasOverlay({ ...canvasOverlay, value: e.target.value })} className="flex-1 h-8 px-2 bg-surface-dark border border-border-dark rounded text-[10px] text-white" />
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-1">
+                                        <div className="flex justify-between text-[9px] font-bold text-slate-500 uppercase">
+                                            <label>Density / Opacity</label>
+                                            <span className="text-primary font-mono">{Math.round(canvasOverlay.opacity * 100)}%</span>
                                         </div>
                                         <input
-                                            type="range" min="0.01" max="0.5" step="0.01"
-                                            value={backgroundConfig.opacity || 0.1}
-                                            onChange={(e) => setBackgroundConfig({ ...backgroundConfig, opacity: parseFloat(e.target.value) })}
+                                            type="range" min="0" max="0.8" step="0.01"
+                                            value={canvasOverlay.opacity}
+                                            onChange={(e) => setCanvasOverlay({ ...canvasOverlay, opacity: parseFloat(e.target.value) })}
                                             className="w-full accent-primary h-1 bg-surface-dark rounded-full appearance-none"
                                         />
                                     </div>
@@ -1173,7 +1345,7 @@ const Studio = () => {
         }
 
         // Properties View
-        const selectedEl = customElements.find(el => el.id === selectedIds[0]);
+        const selectedEl = elements_state.find(el => el.id === selectedIds[0]);
         if (!selectedEl) return null;
 
         const isMulti = selectedIds.length > 1;
@@ -1412,7 +1584,7 @@ const Studio = () => {
                                             key={icon}
                                             onClick={() => {
                                                 selectedIds.forEach(id => {
-                                                    const el = customElements.find(i => i.id === id);
+                                                    const el = elements_state.find(i => i.id === id);
                                                     if (!el) return;
                                                     if (el.type === 'icon') updateElement(id, { props: { text: icon } });
                                                     else updateElement(id, { props: { icon: icon } });
@@ -1428,6 +1600,7 @@ const Studio = () => {
                             </div>
                         )}
                     </div>
+
 
                     {/* Phone Specifics */}
                     {selectedEl.type === 'phone' && !isMulti && (
@@ -1447,6 +1620,42 @@ const Studio = () => {
                             </select>
                             <button onClick={() => fileInputRef.current?.click()} className="w-full py-2 bg-primary/10 border border-primary/20 rounded text-[10px] font-bold text-primary hover:bg-primary hover:text-white transition-all">Upload Screen</button>
                             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
+                        </div>
+                    )}
+
+                    {selectedEl.type === 'shape' && !isMulti && (
+                        <div className="space-y-4 border-t border-border-dark pt-4">
+                            <label className="text-[10px] font-bold text-[#9db2b8] uppercase tracking-widest">Geometry</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                {['square', 'circle', 'pill', 'triangle'].map(s => (
+                                    <button
+                                        key={s}
+                                        onClick={() => updateElement(selectedEl.id, { props: { variant: s } })}
+                                        className={`px-3 py-2 rounded-xl text-[10px] font-bold border transition-all uppercase ${selectedEl.props.variant === s ? 'border-primary bg-primary/10 text-primary' : 'border-border-dark text-slate-500 hover:border-white/10'}`}
+                                    >
+                                        {s}
+                                    </button>
+                                ))}
+                            </div>
+
+                            <div className="space-y-2 mt-4 pt-4 border-t border-border-dark">
+                                <label className="text-[10px] font-bold text-[#9db2b8] uppercase tracking-widest">Border Color</label>
+                                <div className="flex items-center gap-2">
+                                    <input
+                                        type="color"
+                                        value={selectedEl.props.borderColor || '#000000'}
+                                        onChange={(e) => updateElement(selectedEl.id, { props: { borderColor: e.target.value } })}
+                                        className="size-8 rounded cursor-pointer border border-white/5 p-0 bg-transparent"
+                                    />
+                                    <span className="text-[9px] font-mono text-slate-400">{(selectedEl.props.borderColor || '#000000').toUpperCase()}</span>
+                                    <button
+                                        onClick={() => updateElement(selectedEl.id, { props: { borderColor: 'transparent' } })}
+                                        className="text-[9px] text-slate-500 hover:text-white underline ml-auto"
+                                    >
+                                        No Border
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     )}
                 </div>
@@ -1558,14 +1767,14 @@ const Studio = () => {
             <main className="flex-1 flex flex-col min-w-0 bg-background-dark/50" onPointerDown={() => setSelectedIds([])}>
                 <header className="h-16 border-b border-border-dark flex items-center justify-between px-8 bg-background-dark/80 backdrop-blur-md sticky top-0 z-10" onPointerDown={(e) => e.stopPropagation()}>
                     <div className="flex items-center gap-4">
-                        <div className="flex flex-col">
-                            <h1 className="text-lg font-bold tracking-tight">
+                        <div className="flex flex-col min-w-0">
+                            <h1 className="text-lg font-bold tracking-tight truncate max-w-[200px]">
                                 {activeTemplate ? `${activeTemplate} Template` : 'Project Overview'}
                             </h1>
                             {currentProjectId && (
-                                <p className="text-[10px] text-primary font-bold uppercase tracking-widest flex items-center gap-1">
+                                <p className="text-[10px] text-primary font-bold uppercase tracking-widest flex items-center gap-1 truncate">
                                     <span className="material-symbols-outlined text-[12px]">folder</span>
-                                    Editing: {savedProjects.find(p => p.id === currentProjectId)?.name}
+                                    {savedProjects.find(p => p.id === currentProjectId)?.name}
                                 </p>
                             )}
                         </div>
@@ -1576,35 +1785,85 @@ const Studio = () => {
                                 <button
                                     onClick={() => { setActiveTemplate(null); setSelectedIds([]); }}
                                     onPointerDown={(e) => e.stopPropagation()}
-                                    className="h-9 px-4 bg-surface-dark border border-border-dark text-white text-xs font-bold rounded-lg hover:bg-[#293438] transition-all flex items-center gap-2"
+                                    className="h-9 px-3 bg-surface-dark border border-border-dark text-white text-[10px] font-bold rounded-lg hover:bg-[#293438] transition-all flex items-center gap-2 whitespace-nowrap"
                                 >
                                     <span className="material-symbols-outlined text-[18px]">grid_view</span>
-                                    Back to Gallery
+                                    Gallery
                                 </button>
 
-                                <div className="h-6 w-px bg-border-dark mx-2"></div>
+                                <div className="h-6 w-px bg-border-dark mx-1"></div>
+
+                                {/* Project Controls Group */}
+                                <div className="flex items-center gap-1.5 bg-white/5 p-1 rounded-xl border border-white/5">
+                                    <button
+                                        onClick={saveToLibrary}
+                                        className="h-8 px-4 bg-primary text-black text-[10px] font-black rounded-lg hover:scale-105 transition-all flex items-center gap-2 shadow-lg shadow-primary/20 whitespace-nowrap"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">{currentProjectId ? 'history_edu' : 'save_as'}</span>
+                                        {currentProjectId ? 'Version' : 'Save'}
+                                    </button>
+
+                                    <button
+                                        onClick={handleSaveProject}
+                                        className="size-8 bg-surface-dark border border-border-dark text-white rounded-lg hover:bg-[#293438] transition-all flex items-center justify-center"
+                                        title="Download JSON"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">download</span>
+                                    </button>
+
+                                    <button
+                                        onClick={() => projectInputRef.current?.click()}
+                                        className="size-8 bg-surface-dark border border-border-dark text-white rounded-lg hover:bg-[#293438] transition-all flex items-center justify-center"
+                                        title="Load Project"
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">folder_open</span>
+                                    </button>
+                                </div>
+
+                                <div className="h-6 w-px bg-border-dark mx-1"></div>
+
+                                {/* Export Config Toggle */}
+                                <div className="flex items-center gap-2 bg-white/5 p-1 rounded-xl border border-white/5">
+                                    {/* Format Selector */}
+                                    <div className="flex bg-black/20 rounded-lg p-0.5">
+                                        {(['png', 'jpeg', 'webp'] as const).map((fmt) => (
+                                            <button
+                                                key={fmt}
+                                                onClick={() => setExportFormat(fmt)}
+                                                className={`px-2.5 py-1 text-[9px] font-black uppercase rounded-md transition-all ${exportFormat === fmt ? 'bg-primary text-black shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                                            >
+                                                {fmt}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    {/* Orientation Toggle */}
+                                    <div className="flex bg-black/20 rounded-lg p-0.5">
+                                        {(['portrait', 'landscape'] as const).map((orient) => (
+                                            <button
+                                                key={orient}
+                                                onClick={() => setExportOrientation(orient)}
+                                                className={`size-7 flex items-center justify-center rounded-md transition-all ${exportOrientation === orient ? 'bg-primary text-black shadow-lg' : 'text-slate-500 hover:text-white'}`}
+                                                title={orient}
+                                            >
+                                                <span className="material-symbols-outlined text-[16px]">
+                                                    {orient === 'portrait' ? 'stay_current_portrait' : 'landscape'}
+                                                </span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
 
                                 <button
-                                    onClick={saveToLibrary}
-                                    className="h-9 px-4 bg-primary text-black text-xs font-black rounded-lg hover:scale-105 transition-all flex items-center gap-2 shadow-lg shadow-primary/20"
+                                    onClick={handleDownload}
+                                    onPointerDown={(e) => e.stopPropagation()}
+                                    disabled={isExporting}
+                                    className="h-9 px-4 bg-primary text-black text-[10px] font-black uppercase rounded-xl hover:scale-105 transition-all flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-primary/30 whitespace-nowrap"
                                 >
-                                    <span className="material-symbols-outlined text-[18px]">{currentProjectId ? 'history_edu' : 'save_as'}</span>
-                                    {currentProjectId ? 'Create New Version' : 'Save Project (v1)'}
+                                    <span className="material-symbols-outlined text-[18px]">file_download</span>
+                                    {isExporting ? '...' : 'Export'}
                                 </button>
-                                <button
-                                    onClick={handleSaveProject}
-                                    className="h-9 px-4 bg-surface-dark border border-border-dark text-white text-xs font-bold rounded-lg hover:bg-[#293438] transition-all flex items-center gap-2"
-                                >
-                                    <span className="material-symbols-outlined text-[18px]">download</span>
-                                    Download JSON
-                                </button>
-                                <button
-                                    onClick={() => projectInputRef.current?.click()}
-                                    className="h-9 px-4 bg-surface-dark border border-border-dark text-white text-xs font-bold rounded-lg hover:bg-[#293438] transition-all flex items-center gap-2"
-                                >
-                                    <span className="material-symbols-outlined text-[18px]">folder_open</span>
-                                    Load
-                                </button>
+
                                 <input
                                     type="file"
                                     ref={projectInputRef}
@@ -1612,160 +1871,180 @@ const Studio = () => {
                                     accept=".json"
                                     onChange={handleLoadProject}
                                 />
-
-                                <div className="h-6 w-px bg-border-dark mx-2"></div>
-
-                                <button
-                                    onClick={handleDownload}
-                                    onPointerDown={(e) => e.stopPropagation()}
-                                    disabled={isExporting}
-                                    className="h-9 px-4 bg-primary text-white text-xs font-bold rounded-lg hover:opacity-90 transition-all flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-primary/20"
-                                >
-                                    <span className="material-symbols-outlined text-[18px]">file_download</span>
-                                    {isExporting ? 'Exporting...' : 'Export PNG'}
-                                </button>
                             </>
                         )}
                     </div>
                 </header>
 
-                <div className="flex-1 overflow-auto p-8 code-scrollbar flex justify-center items-start">
+                <div
+                    ref={containerRef}
+                    className="flex-1 overflow-auto p-20 flex justify-center items-center bg-[#0d0f14] relative bg-grid-slate-900/[0.05] scrollbar-thin scrollbar-thumb-white/10"
+                    onPointerDown={() => setSelectedIds([])}
+                >
                     {activeTemplate ? (
                         <div
-                            id="capture-target"
-                            className="relative border border-border-dark rounded-xl overflow-hidden shadow-2xl transition-all duration-300"
-                            onPointerDown={(e) => e.stopPropagation()}
+                            className="relative flex items-center justify-center"
                             style={{
-                                width: '100%',
-                                minHeight: '600px',
-                                backgroundColor: backgroundConfig.type === 'solid' ? backgroundConfig.value : '#000000',
+                                transform: `scale(${canvasScale})`,
+                                transition: 'transform 0.15s cubic-bezier(0.4, 0, 0.2, 1)',
+                                transformOrigin: 'center center',
+                                width: exportOrientation === 'landscape' ? '1280px' : '720px',
+                                height: exportOrientation === 'landscape' ? '720px' : '1280px',
                             }}
                         >
-                            {/* Robust Multi-layer Background System */}
                             <div
-                                className="absolute inset-0 pointer-events-none"
-                                style={{
-                                    zIndex: 0,
-                                    backgroundImage: backgroundConfig.type === 'gradient' ?
-                                        `linear-gradient(135deg, ${backgroundConfig.value.split(',')[0]}, ${backgroundConfig.value.split(',')[1] || '#000000'})` :
-                                        'none',
+                                id="capture-target"
+                                className={`relative shadow-[0_0_100px_rgba(0,0,0,0.5)] rounded-2xl capture-target transition-all duration-300 ${isExporting ? 'overflow-hidden' : ''}`}
+                                onPointerDown={(e) => {
+                                    e.stopPropagation();
                                 }}
-                            />
-
-                            {(backgroundConfig.type === 'grid' || backgroundConfig.type === 'pattern') && (
+                                style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    backgroundColor: canvasBackground.type === 'solid' ? canvasBackground.value : 'transparent',
+                                    position: 'relative'
+                                }}
+                            >
+                                {/* 1. Base Layer */}
                                 <div
                                     className="absolute inset-0 pointer-events-none"
                                     style={{
-                                        zIndex: 1,
-                                        opacity: backgroundConfig.opacity || 0.1,
-                                        backgroundImage: backgroundConfig.type === 'grid' ?
-                                            `radial-gradient(circle at 1px 1px, ${backgroundConfig.value} 1px, transparent 0)` :
-                                            (backgroundConfig.value === 'Waves' ? 'url("https://www.transparenttextures.com/patterns/wavecut.png")' :
-                                                backgroundConfig.value === 'ZigZag' ? 'url("https://www.transparenttextures.com/patterns/shattered.png")' :
-                                                    backgroundConfig.value === 'Dots' ? 'url("https://www.transparenttextures.com/patterns/micro-carbon.png")' :
-                                                        'url("https://www.transparenttextures.com/patterns/carbon-fibre.png")'),
-                                        backgroundSize: backgroundConfig.type === 'grid' ? '24px 24px' : '100px 100px'
+                                        zIndex: 0,
+                                        backgroundColor: canvasBackground.type === 'solid' ? canvasBackground.value : 'transparent',
+                                        backgroundImage: canvasBackground.type === 'image' && canvasBackground.value ? `url(${canvasBackground.value})` : 'none',
+                                        backgroundSize: 'cover',
+                                        backgroundPosition: 'center',
+                                        opacity: canvasBackground.type === 'image' ? canvasBackground.opacity : 1
                                     }}
                                 />
-                            )}
 
-                            <div className="relative z-10 w-full h-full">
-                                {renderActiveTemplate()}
-                                {renderCustomElements()}
+                                {/* 1.1 Mesh Point Layer */}
+                                {canvasBackground.type === 'mesh' && (
+                                    <div className="absolute inset-0 pointer-events-none overflow-hidden" style={{ zIndex: 0 }}>
+                                        {(JSON.parse(canvasBackground.value) as BackgroundPoint[]).map(p => (
+                                            <div
+                                                key={p.id}
+                                                className="absolute rounded-full"
+                                                style={{
+                                                    left: `${p.x}%`,
+                                                    top: `${p.y}%`,
+                                                    width: `${p.scale}px`,
+                                                    height: `${p.scale}px`,
+                                                    backgroundColor: p.color,
+                                                    filter: `blur(${p.blur}px)`,
+                                                    transform: 'translate(-50%, -50%)',
+                                                    opacity: canvasBackground.opacity
+                                                }}
+                                            />
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* 2. Overlay Layer (Patterns) */}
+                                {canvasOverlay.type !== 'none' && (
+                                    <div
+                                        className="absolute inset-0 pointer-events-none"
+                                        style={{
+                                            zIndex: 1,
+                                            opacity: canvasOverlay.opacity,
+                                            backgroundImage: canvasOverlay.type === 'grid' ?
+                                                `radial-gradient(circle at 1px 1px, ${canvasOverlay.value} 1px, transparent 0)` :
+                                                canvasOverlay.type === 'dots' ?
+                                                    `radial-gradient(${canvasOverlay.value} 1px, transparent 2px)` :
+                                                    canvasOverlay.type === 'gradient' ?
+                                                        `linear-gradient(135deg, ${canvasOverlay.value.split(',')[0]}, ${canvasOverlay.value.split(',')[1]})` :
+                                                        (canvasOverlay.value === 'Waves' ? `url("https://images.weserv.nl/?url=${encodeURIComponent('https://www.transparenttextures.com/patterns/wavecut.png')}")` :
+                                                            canvasOverlay.value === 'ZigZag' ? `url("https://images.weserv.nl/?url=${encodeURIComponent('https://www.transparenttextures.com/patterns/shattered.png')}")` :
+                                                                canvasOverlay.value === 'Dots' ? `url("https://images.weserv.nl/?url=${encodeURIComponent('https://www.transparenttextures.com/patterns/micro-carbon.png')}")` :
+                                                                    `url("https://images.weserv.nl/?url=${encodeURIComponent('https://www.transparenttextures.com/patterns/carbon-fibre.png')}")`),
+                                            backgroundSize: canvasOverlay.type === 'grid' ? '24px 24px' : canvasOverlay.type === 'dots' ? '12px 12px' : '100px 100px',
+                                            backgroundRepeat: 'repeat'
+                                        }}
+                                    />
+                                )}
+
+                                <div className="relative z-10 w-full h-full">
+                                    {/* Template Background Layer */}
+                                    <div className="absolute inset-0 z-0 overflow-hidden">
+                                        {renderActiveTemplate()}
+                                    </div>
+
+                                    {/* Custom Elements Layer - Top Priority */}
+                                    <div className={`absolute inset-0 z-[100] ${isExporting ? 'pointer-events-none' : ''}`}>
+                                        {renderCustomElements()}
+                                    </div>
+
+                                </div>
                             </div>
                         </div>
                     ) : (
-                        <div className="w-full max-w-6xl space-y-12">
-                            {/* Dashboard Heading */}
+                        <div className="text-white/20 text-4xl font-black uppercase tracking-widest animate-pulse">Select a Template</div>
+                    )}
+
+                    {/* Floating Zoom Controls */}
+                    <div className="absolute bottom-10 right-10 flex items-center gap-4 bg-black/60 backdrop-blur-xl p-2 rounded-2xl border border-white/10 shadow-2xl z-[200]">
+                        <button
+                            onClick={() => setUserZoom(prev => Math.max(0.1, prev - 0.1))}
+                            className="size-10 flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
+                        >
+                            <span className="material-symbols-outlined">remove</span>
+                        </button>
+                        <div className="text-[10px] font-black text-white w-12 text-center uppercase tracking-tighter">
+                            {Math.round(canvasScale * 100)}%
+                        </div>
+                        <button
+                            onClick={() => setUserZoom(prev => Math.min(3, prev + 0.1))}
+                            className="size-10 flex items-center justify-center rounded-xl bg-white/5 hover:bg-white/10 transition-colors"
+                        >
+                            <span className="material-symbols-outlined">add</span>
+                        </button>
+                        <div className="w-px h-6 bg-white/10 mx-1"></div>
+                        <button
+                            onClick={() => setUserZoom(1)}
+                            className="px-3 h-10 flex items-center justify-center rounded-xl bg-primary text-black text-[10px] font-black uppercase hover:scale-105 transition-all"
+                        >
+                            Reset
+                        </button>
+                    </div>
+                </div>
+                {
+                    !activeTemplate && (
+                        <div className="p-12 w-full max-w-7xl mx-auto space-y-12">
+                            {/* Welcome Heading */}
                             <div className="flex flex-col gap-2">
                                 <h2 className="text-3xl font-black tracking-tight text-white flex items-center gap-4">
-                                    Welcome back, Developer
-                                    <span className="text-[10px] font-bold py-1 px-3 bg-primary/10 text-primary border border-primary/20 rounded-full uppercase tracking-tighter">Pro Studio</span>
+                                    Welcome to Studio v2
+                                    <span className="text-[10px] font-bold py-1 px-3 bg-primary/10 text-primary border border-primary/20 rounded-full uppercase tracking-tighter">Pro</span>
                                 </h2>
-                                <p className="text-slate-500 text-sm font-medium">Create stunning mobile UI mockups with ease.</p>
+                                <p className="text-slate-500 text-sm font-medium">Create and manage your high-fidelity design projects.</p>
                             </div>
 
-                            {/* Saved Projects (Dashboard View) */}
-                            {savedProjects.length > 0 && (
-                                <div>
-                                    <div className="flex items-center justify-between mb-6 group cursor-pointer" onClick={() => setSidebarTab('projects')}>
-                                        <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-400 flex items-center gap-3">
-                                            <span className="size-2 rounded-full bg-primary animate-pulse"></span>
-                                            Recent Projects
-                                        </h3>
-                                        <div className="flex items-center gap-2 text-primary text-[10px] font-black uppercase tracking-widest opacity-0 group-hover:opacity-100 transition-all">
-                                            View Library <span className="material-symbols-outlined text-sm">arrow_forward</span>
-                                        </div>
-                                    </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                                        {savedProjects.slice(0, 3).map(proj => (
-                                            <div
-                                                key={proj.id}
-                                                className="group relative bg-[#111317] border border-border-dark rounded-2xl overflow-hidden hover:border-primary/50 transition-all cursor-pointer shadow-2xl hover:translate-y-[-4px]"
-                                                onClick={() => loadVersion(proj, proj.versions[0])}
-                                            >
-                                                <div className="aspect-video bg-[#0a0a0a] flex items-center justify-center p-8 relative">
-                                                    <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-purple-500/5"></div>
-                                                    <div className="scale-75 opacity-20 group-hover:opacity-60 transition-all blur-sm group-hover:blur-none">
-                                                        <div className="size-24 bg-primary/20 rounded-full blur-2xl"></div>
-                                                        <div className="w-40 h-10 bg-white/5 rounded-lg border border-white/10 mt-4 translate-x-4"></div>
-                                                        <div className="w-40 h-10 bg-white/5 rounded-lg border border-white/10 mt-2"></div>
-                                                    </div>
-                                                    <div className="absolute top-4 right-4 bg-black/60 backdrop-blur-md px-2 py-1 rounded text-[9px] font-bold text-primary border border-primary/20">
-                                                        v{proj.versions.length}
-                                                    </div>
-                                                </div>
-                                                <div className="p-5 border-t border-border-dark flex flex-col gap-1 bg-[#14161b]">
-                                                    <h4 className="font-bold text-white group-hover:text-primary transition-colors truncate">{proj.name}</h4>
-                                                    <div className="flex items-center justify-between">
-                                                        <span className="text-[10px] text-slate-500">{new Date(proj.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</span>
-                                                        <span className="text-[10px] text-slate-400 flex items-center gap-1 font-mono uppercase">
-                                                            <span className="material-symbols-outlined text-[12px]">schedule</span>
-                                                            {new Date(proj.versions[proj.versions.length - 1].timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
+                            {/* Presets Gallery */}
                             <div>
                                 <h3 className="text-sm font-bold uppercase tracking-[0.2em] text-slate-400 mb-6 flex items-center gap-3">
                                     <span className="size-2 rounded-full bg-slate-600"></span>
                                     Design Templates
                                 </h3>
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                                    {/* Create Blank */}
                                     <div className="group relative" onClick={() => setActiveTemplate('Blank')}>
-                                        <div className="aspect-[9/16] bg-[#111317] rounded-2xl border-2 border-dashed border-border-dark flex flex-col items-center justify-center gap-4 hover:border-primary/50 hover:bg-white/[0.02] transition-all text-slate-500 hover:text-white cursor-pointer shadow-xl">
-                                            <div className="size-14 rounded-full bg-surface-dark flex items-center justify-center group-hover:bg-primary group-hover:text-black transition-all shadow-lg group-hover:shadow-primary/20">
+                                        <div className="aspect-[9/16] bg-[#111317] rounded-2xl border-2 border-dashed border-border-dark flex flex-col items-center justify-center gap-4 hover:border-primary/50 hover:bg-white/[0.02] transition-all text-slate-500 hover:text-white cursor-pointer">
+                                            <div className="size-14 rounded-full bg-surface-dark flex items-center justify-center group-hover:bg-primary group-hover:text-black transition-all">
                                                 <span className="material-symbols-outlined text-3xl">add</span>
                                             </div>
-                                            <div className="flex flex-col items-center gap-1">
-                                                <span className="text-xs font-black uppercase tracking-widest text-white">Empty Canvas</span>
-                                                <span className="text-[9px] font-bold opacity-40 uppercase tracking-tighter">Start New Design</span>
-                                            </div>
+                                            <span className="text-xs font-black uppercase tracking-widest text-white">Empty Canvas</span>
                                         </div>
                                     </div>
 
                                     {(['Hero', 'Global', 'Analytics', 'Savings'] as TemplateId[]).map((t) => (
                                         <div key={t} className="group relative cursor-pointer" onClick={() => setActiveTemplate(t)}>
-                                            <div className="aspect-[9/16] bg-[#111317] rounded-2xl border border-border-dark overflow-hidden transition-all group-hover:border-primary/50 shadow-xl group-hover:translate-y-[-4px]">
+                                            <div className="aspect-[9/16] bg-[#111317] rounded-2xl border border-border-dark overflow-hidden transition-all group-hover:border-primary/50">
                                                 <div className="h-full w-full bg-gradient-to-br from-black to-[#1a1c22] flex flex-col items-center justify-center p-8 text-center relative">
-                                                    <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-20 transition-all">
-                                                        <span className="material-symbols-outlined text-8xl">
-                                                            {t === 'Hero' ? 'rocket_launch' : t === 'Global' ? 'public' : t === 'Analytics' ? 'insights' : 'savings'}
-                                                        </span>
-                                                    </div>
                                                     <span className="material-symbols-outlined text-5xl text-primary/40 group-hover:text-primary transition-all mb-4">
                                                         {t === 'Hero' ? 'rocket' : t === 'Global' ? 'public' : t === 'Analytics' ? 'bar_chart' : 'savings'}
                                                     </span>
                                                     <h5 className="text-sm font-black text-white mb-2">{t} Preset</h5>
-                                                    <p className="text-[10px] text-slate-500 font-medium leading-relaxed">Modern mobile UI layout optimized for {t.toLowerCase()} showcase.</p>
-                                                    <div className="mt-6 h-8 px-4 rounded-full bg-white/5 border border-white/5 text-[9px] font-black uppercase tracking-[0.2em] flex items-center justify-center text-slate-400 group-hover:bg-primary group-hover:text-black group-hover:border-primary transition-all">
-                                                        Select Preset
+                                                    <div className="mt-6 h-8 px-4 rounded-full bg-white/5 border border-white/5 text-[9px] font-black uppercase tracking-[0.2em] flex items-center justify-center text-slate-400 group-hover:bg-primary group-hover:text-black transition-all">
+                                                        Select
                                                     </div>
                                                 </div>
                                             </div>
@@ -1774,9 +2053,9 @@ const Studio = () => {
                                 </div>
                             </div>
                         </div>
-                    )}
-                </div>
-            </main>
+                    )
+                }
+            </main >
 
             <aside className="hidden md:flex w-80 border-l border-border-dark flex-col bg-surface-dark/40 backdrop-blur-xl shrink-0 z-20">
                 <div className="flex items-center px-6 py-4 border-b border-border-dark h-[53px]">
@@ -1788,9 +2067,8 @@ const Studio = () => {
                     {renderSidebarControls()}
                 </div>
             </aside>
-        </div>
+        </div >
     );
 };
 
 export default Studio;
-
