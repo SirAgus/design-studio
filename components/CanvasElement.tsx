@@ -4,7 +4,7 @@ import { motion, useDragControls } from 'framer-motion';
 
 type CanvasElementProps = {
     id: string;
-    type: 'phone' | 'bubble' | 'stat' | 'text' | 'sticker' | 'icon' | 'graphics' | 'group' | 'message-stack' | 'avatar-group' | 'grid-menu' | 'chart' | 'progress-circle' | 'shape' | 'brush';
+    type: 'phone' | 'bubble' | 'stat' | 'text' | 'sticker' | 'icon' | 'graphics' | 'group' | 'message-stack' | 'avatar-group' | 'grid-menu' | 'chart' | 'progress-circle' | 'shape' | 'brush' | 'image';
     data: { x: number; y: number; scale: number; rotation?: number; content?: string };
     isSelected: boolean;
     onSelect: (id: string, e?: React.MouseEvent | React.PointerEvent) => void;

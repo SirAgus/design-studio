@@ -81,7 +81,7 @@ type CanvasOverlay = {
 
 type CustomElement = {
     id: string;
-    type: 'phone' | 'bubble' | 'stat' | 'text' | 'sticker' | 'icon' | 'graphics' | 'group' | 'message-stack' | 'avatar-group' | 'grid-menu' | 'chart' | 'progress-circle' | 'shape';
+    type: 'phone' | 'bubble' | 'stat' | 'text' | 'sticker' | 'icon' | 'graphics' | 'group' | 'message-stack' | 'avatar-group' | 'grid-menu' | 'chart' | 'progress-circle' | 'image';
     x: number;
     y: number;
     scale: number;
@@ -448,7 +448,8 @@ const Studio = () => {
         if (type === 'text') defaultProps = { ...defaultProps, text: 'Headline', label: 'Design Studio', variant: 'solid', textColor: '#ffffff' };
         if (type === 'sticker') defaultProps = { ...defaultProps, text: 'NEW', bgColor: '#0bc9da', bgOpacity: 1.0 };
         if (type === 'icon') defaultProps = { ...defaultProps, text: 'star', iconColor: '#ffffff' };
-        if (type === 'graphics') defaultProps = { ...defaultProps, text: '' };
+        if (type === 'graphics') defaultProps = { ...defaultProps, text: '', bgOpacity: 0.4 };
+        if (type === 'image') defaultProps = { ...defaultProps, image: '', bgColor: 'transparent' };
 
         setElementsState([...elements_state, {
             id: newId,
@@ -1037,29 +1038,39 @@ const Studio = () => {
 
                                 {el.type === 'graphics' && (
                                     <div
-                                        className="w-full h-full bg-gradient-to-br from-primary/20 to-purple-500/20 rounded-full blur-xl border border-white/10"
+                                        className="size-96 blur-[100px] rounded-full opacity-80 pointer-events-none"
                                         style={{
-                                            backgroundColor: el.props.bgColor || el.props.color ? `${el.props.bgColor || el.props.color}33` : undefined
+                                            backgroundColor: el.props.bgColor
+                                                ? (el.props.bgColor + Math.round((el.props.bgOpacity ?? 0.6) * 255).toString(16).padStart(2, '0'))
+                                                : 'rgba(23, 161, 207, 0.7)'
                                         }}
                                     ></div>
                                 )}
 
-                                {el.type === 'shape' && (
+                                {el.type === 'image' && (
                                     <div
-                                        className={`
-                                        w-full h-full border-2
-                                        ${el.props.variant === 'circle' ? 'rounded-full' : ''}
-                                        ${el.props.variant === 'pill' ? 'rounded-full' : ''}
-                                        ${el.props.variant === 'square' ? 'rounded-xl' : ''}
-                                        ${el.props.variant === 'triangle' ? 'clip-triangle' : ''}
-                                     `}
-                                        style={{
-                                            backgroundColor: el.props.bgColor || el.props.color || '#3b82f6',
-                                            borderColor: el.props.borderColor || 'transparent',
-                                            opacity: el.props.bgOpacity ?? 1
-                                        }}
-                                    />
+                                        className={`w-full h-full flex items-center justify-center overflow-hidden group/img transition-all duration-500
+                                            ${el.props.variant === 'circle' ? 'rounded-full' : ''}
+                                            ${el.props.variant === 'squircle' ? 'rounded-[30%]' : ''}
+                                            ${el.props.variant === 'rounded' || !el.props.variant ? 'rounded-3xl' : ''}
+                                            ${el.props.variant === 'glass' ? 'backdrop-blur-xl bg-white/5 border border-white/10 p-2' : ''}
+                                        `}
+                                    >
+                                        {el.props.image ? (
+                                            <img
+                                                src={el.props.image}
+                                                alt="Custom"
+                                                className={`w-full h-full object-cover pointer-events-none select-none ${el.props.variant === 'glass' ? 'rounded-[inherit]' : ''}`}
+                                            />
+                                        ) : (
+                                            <div className="w-full h-full bg-white/5 border-2 border-dashed border-white/10 flex flex-col items-center justify-center gap-2">
+                                                <span className="material-symbols-outlined text-white/20 text-3xl">image</span>
+                                                <span className="text-[10px] font-bold text-white/20 uppercase tracking-widest">No Image</span>
+                                            </div>
+                                        )}
+                                    </div>
                                 )}
+
 
                             </CanvasElement>
                         </div>
@@ -1097,13 +1108,13 @@ const Studio = () => {
                             <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">blur_on</span>
                             <span className="text-[10px] font-bold text-slate-300">Glass Blob</span>
                         </button>
-                        <button onClick={() => addElement('shape')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group">
-                            <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">category</span>
-                            <span className="text-[10px] font-bold text-slate-300">Vector Shape</span>
-                        </button>
-                        <button onClick={() => addElement('text')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group col-span-2">
+                        <button onClick={() => addElement('text')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group lg:col-span-1">
                             <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">title</span>
                             <span className="text-[10px] font-bold text-slate-300">Text Block</span>
+                        </button>
+                        <button onClick={() => addElement('image')} className="flex flex-col items-center gap-2 p-3 rounded-xl bg-surface-dark border border-border-dark hover:border-primary/50 hover:bg-white/5 transition-all group">
+                            <span className="material-symbols-outlined text-2xl text-slate-400 group-hover:text-primary">add_a_photo</span>
+                            <span className="text-[10px] font-bold text-slate-300">Media</span>
                         </button>
                     </div>
 
@@ -1517,6 +1528,14 @@ const Studio = () => {
                                         {selectedEl.type === 'sticker' && <><option value="tape">Tape</option><option value="stamp">Stamp</option><option value="tag">Tag</option></>}
                                         {selectedEl.type === 'stat' && <><option value="minimal">Minimal</option><option value="pill">Pill</option><option value="graph">Graph</option></>}
                                         {selectedEl.type === 'bubble' && <><option value="solid">Solid</option><option value="glass">Glass (Glassmorphism)</option><option value="user">User</option></>}
+                                        {selectedEl.type === 'image' && (
+                                            <>
+                                                <option value="rounded">Rounded Rectangle</option>
+                                                <option value="circle">Perfect Circle</option>
+                                                <option value="squircle">Squircle (iOS style)</option>
+                                                <option value="glass">Glass Frame</option>
+                                            </>
+                                        )}
                                         {selectedEl.type === 'text' && (
                                             <>
                                                 <option value="heading">Heading</option>
@@ -1623,41 +1642,26 @@ const Studio = () => {
                         </div>
                     )}
 
-                    {selectedEl.type === 'shape' && !isMulti && (
+                    {selectedEl.type === 'image' && !isMulti && (
                         <div className="space-y-4 border-t border-border-dark pt-4">
-                            <label className="text-[10px] font-bold text-[#9db2b8] uppercase tracking-widest">Geometry</label>
-                            <div className="grid grid-cols-2 gap-2">
-                                {['square', 'circle', 'pill', 'triangle'].map(s => (
-                                    <button
-                                        key={s}
-                                        onClick={() => updateElement(selectedEl.id, { props: { variant: s } })}
-                                        className={`px-3 py-2 rounded-xl text-[10px] font-bold border transition-all uppercase ${selectedEl.props.variant === s ? 'border-primary bg-primary/10 text-primary' : 'border-border-dark text-slate-500 hover:border-white/10'}`}
-                                    >
-                                        {s}
-                                    </button>
-                                ))}
-                            </div>
-
-                            <div className="space-y-2 mt-4 pt-4 border-t border-border-dark">
-                                <label className="text-[10px] font-bold text-[#9db2b8] uppercase tracking-widest">Border Color</label>
-                                <div className="flex items-center gap-2">
-                                    <input
-                                        type="color"
-                                        value={selectedEl.props.borderColor || '#000000'}
-                                        onChange={(e) => updateElement(selectedEl.id, { props: { borderColor: e.target.value } })}
-                                        className="size-8 rounded cursor-pointer border border-white/5 p-0 bg-transparent"
-                                    />
-                                    <span className="text-[9px] font-mono text-slate-400">{(selectedEl.props.borderColor || '#000000').toUpperCase()}</span>
-                                    <button
-                                        onClick={() => updateElement(selectedEl.id, { props: { borderColor: 'transparent' } })}
-                                        className="text-[9px] text-slate-500 hover:text-white underline ml-auto"
-                                    >
-                                        No Border
-                                    </button>
-                                </div>
-                            </div>
+                            <label className="text-[10px] font-bold text-[#9db2b8] uppercase tracking-widest">Image Source</label>
+                            <button
+                                onClick={() => fileInputRef.current?.click()}
+                                className="w-full h-32 border-2 border-dashed border-border-dark rounded-xl flex flex-col items-center justify-center gap-2 hover:border-primary/50 transition-all bg-black/20 overflow-hidden group"
+                            >
+                                {selectedEl.props.image ? (
+                                    <img src={selectedEl.props.image} className="w-full h-full object-cover" />
+                                ) : (
+                                    <>
+                                        <span className="material-symbols-outlined text-slate-500 group-hover:text-primary transition-colors">add_photo_alternate</span>
+                                        <span className="text-[9px] font-bold text-slate-500 uppercase">Select Image</span>
+                                    </>
+                                )}
+                            </button>
+                            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleImageUpload} />
                         </div>
                     )}
+
                 </div>
             </div>
         );
